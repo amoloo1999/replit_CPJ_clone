@@ -1,0 +1,16 @@
+{
+  "schema_version": "v1",
+  "name_for_human": "Storedge Pricing Automation",
+  "name_for_model": "storedge_pricing_automation",
+  "description_for_human": "Automate Storedge rate changes via GPT—supports manual and bucket-driven workflows.",
+  "description_for_model": "Plugin to retrieve site keys, filter/edit unit-group rates, and calculate bucket-based pricing.",
+  "auth": { "type": "none" },
+  "api": {
+    "type": "openapi",
+    "url": "https://rate-changer.replit.app/openapi.json",
+    "is_user_authenticated": false
+  },
+  "instructions_url": "https://rate-changer.replit.app/openapi.json",  <-- CHANGE THIS
+  "logo_url": "https://rate-changer.replit.app/static/icon.png"
+}
+
