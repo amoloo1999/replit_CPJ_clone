@@ -514,47 +514,50 @@ def bulk_create_units(facility_id):
 
 @app.put("/facilities/<facility_id>/units/<unit_id>/make_rentable")
 def make_unit_rentable(facility_id, unit_id):
-    """Make a single unit rentable or unrentable.
-    Docs: /docs/private/api-v1-units/make_unit_rentable.html
-    Body: {"reason": "string", "rentable": true/false}
+    """Make a single unit rentable or unrentable using the bulk_update API.
+    Body: {"rentable": true/false} - rentable is required
     """
     guard = require_bearer(request)
     if guard: return guard
     
     raw_body = request.get_json(silent=True) or {}
     
-    # Validate required fields
-    reason = raw_body.get("reason", "").strip()
-    if not reason:
-        return jsonify({"error": "VALIDATION_FAILED", "details": [{"field": "reason", "message": "Reason is required"}]}), 400
+    # Validate required fields - rentable is required
+    if "rentable" not in raw_body:
+        return jsonify({"error": "VALIDATION_FAILED", "details": [{"field": "rentable", "message": "rentable field is required (true or false)"}]}), 400
     
-    # Optional: rentable field (defaults to True for backward compatibility)
-    rentable = raw_body.get("rentable", True)
+    rentable = raw_body.get("rentable")
     if rentable not in (True, False):
         return jsonify({"error": "VALIDATION_FAILED", "details": [{"field": "rentable", "message": "Must be true or false"}]}), 400
     
-    # Prepare request body for Storedge API
+    # Use bulk_update API with single unit
     storedge_body = {
-        "reason": reason,
-        "unit": raw_body.get("unit", {})  # Additional unit data if needed
+        "units": [
+            {
+                "id": unit_id,
+                "rentable": rentable
+            }
+        ]
     }
     
-    # Note: The Storedge API doesn't seem to have a direct "rentable" field in request
-    # The rentable status is controlled by the endpoint logic and reason
-    
-    url = f"{BASE_URL}/v1/{facility_id}/units/{unit_id}/make_unit_rentable"
+    url = f"{BASE_URL}/v1/{facility_id}/units/bulk_update"
     r = requests.put(url, json=storedge_body, auth=OAuth1(API_KEY, API_SECRET), timeout=60)
     
     try:
-        return jsonify(r.json()), r.status_code
+        response_data = r.json()
+        # Return the first unit from the response since we only updated one
+        if r.status_code == 200 and "units" in response_data and response_data["units"]:
+            return jsonify(response_data["units"][0]), r.status_code
+        else:
+            return jsonify(response_data), r.status_code
     except Exception:
         return (r.text, r.status_code, {"Content-Type": "application/json"})
 
 
 @app.post("/facilities/<facility_id>/units/bulk_make_rentable")
 def bulk_make_units_rentable(facility_id):
-    """Make multiple units rentable/unrentable by calling individual API endpoints.
-    Body: {"units": [{"id": "unit_id", "reason": "string", "rentable": true/false}]}
+    """Make multiple units rentable/unrentable using the bulk_update API.
+    Body: {"units": [{"id": "unit_id", "rentable": true/false}]}
     """
     guard = require_bearer(request)
     if guard: return guard
@@ -565,62 +568,50 @@ def bulk_make_units_rentable(facility_id):
     if not isinstance(units, list) or not units:
         return jsonify({"error": "VALIDATION_FAILED", "details": [{"message": "units array is required"}]}), 400
     
-    results = []
+    # Validate and prepare units for bulk_update
+    validated_units = []
+    validation_errors = []
     
-    for unit_data in units:
+    for i, unit_data in enumerate(units):
         if not isinstance(unit_data, dict):
-            results.append({
-                "unit_id": "unknown",
-                "success": False,
-                "error": "Unit data must be an object"
-            })
+            validation_errors.append({"index": i, "error": "Unit data must be an object"})
             continue
             
         unit_id = unit_data.get("id")
-        reason = unit_data.get("reason", "").strip()
-        rentable = unit_data.get("rentable", True)
-        
         if not unit_id:
-            results.append({
-                "unit_id": "unknown", 
-                "success": False,
-                "error": "Unit ID is required"
-            })
+            validation_errors.append({"index": i, "error": "Unit ID is required"})
             continue
             
-        if not reason:
-            results.append({
-                "unit_id": unit_id,
-                "success": False, 
-                "error": "Reason is required"
-            })
+        if "rentable" not in unit_data:
+            validation_errors.append({"index": i, "unit_id": unit_id, "error": "rentable field is required"})
+            continue
+            
+        rentable = unit_data.get("rentable")
+        if rentable not in (True, False):
+            validation_errors.append({"index": i, "unit_id": unit_id, "error": "rentable must be true or false"})
             continue
         
-        # Make individual API call
-        storedge_body = {
-            "reason": reason,
-            "unit": unit_data.get("unit", {})
-        }
-        
-        try:
-            url = f"{BASE_URL}/v1/{facility_id}/units/{unit_id}/make_unit_rentable"
-            r = requests.put(url, json=storedge_body, auth=OAuth1(API_KEY, API_SECRET), timeout=60)
-            
-            results.append({
-                "unit_id": unit_id,
-                "success": r.status_code == 200,
-                "status_code": r.status_code,
-                "response": r.json() if r.headers.get('content-type', '').startswith('application/json') else r.text
-            })
-            
-        except Exception as e:
-            results.append({
-                "unit_id": unit_id,
-                "success": False,
-                "error": str(e)
-            })
+        validated_units.append({
+            "id": unit_id,
+            "rentable": rentable
+        })
     
-    return jsonify({"results": results}), 200
+    if validation_errors:
+        return jsonify({"error": "VALIDATION_FAILED", "details": validation_errors}), 400
+    
+    if not validated_units:
+        return jsonify({"error": "VALIDATION_FAILED", "details": [{"message": "No valid units to process"}]}), 400
+    
+    # Use Storedge bulk_update API
+    storedge_body = {"units": validated_units}
+    
+    url = f"{BASE_URL}/v1/{facility_id}/units/bulk_update"
+    r = requests.put(url, json=storedge_body, auth=OAuth1(API_KEY, API_SECRET), timeout=120)
+    
+    try:
+        return jsonify(r.json()), r.status_code
+    except Exception:
+        return (r.text, r.status_code, {"Content-Type": "application/json"})
 
 
 @app.get("/facilities/<facility_id>/units/count")
@@ -1473,6 +1464,7 @@ def readiness():
     checks = {
         "api_keys": bool(API_KEY and API_SECRET),
         "company_id": bool(COMPANY_ID),
+        "proxy_bearer": bool(PROXY_BEARER),
         "flask_app": True
     }
     
@@ -1484,6 +1476,110 @@ def readiness():
         "checks": checks,
         "timestamp": datetime.utcnow().isoformat()
     }), status_code
+
+
+@app.route("/debug/auth-test")
+def debug_auth_test():
+    """Debug endpoint to test authentication without side effects"""
+    guard = require_bearer(request)
+    if guard: 
+        return guard
+    
+    return jsonify({
+        "message": "Authentication successful!",
+        "proxy_bearer_set": bool(PROXY_BEARER),
+        "proxy_bearer_length": len(PROXY_BEARER) if PROXY_BEARER else 0,
+        "authorization_header": request.headers.get("Authorization", "Not provided")[:50] + "..." if request.headers.get("Authorization") else "Not provided",
+        "timestamp": datetime.utcnow().isoformat()
+    }), 200
+
+
+@app.route("/debug/storedge-test/<facility_id>/<unit_id>", methods=["PUT"])
+def debug_storedge_test(facility_id, unit_id):
+    """Debug endpoint to test the Storedge API call directly"""
+    guard = require_bearer(request)
+    if guard: return guard
+    
+    raw_body = request.get_json(silent=True) or {}
+    reason = raw_body.get("reason", "Debug test from proxy")
+    
+    # Test the exact Storedge API call
+    storedge_body = {
+        "reason": reason,
+        "unit": {}
+    }
+    
+    url = f"{BASE_URL}/v1/{facility_id}/units/{unit_id}/make_unit_rentable"
+    
+    try:
+        print(f"[DEBUG] Calling Storedge API: {url}")
+        print(f"[DEBUG] Request body: {storedge_body}")
+        print(f"[DEBUG] API Key set: {bool(API_KEY)}")
+        print(f"[DEBUG] API Secret set: {bool(API_SECRET)}")
+        
+        r = requests.put(url, json=storedge_body, auth=OAuth1(API_KEY, API_SECRET), timeout=60)
+        
+        print(f"[DEBUG] Storedge response status: {r.status_code}")
+        print(f"[DEBUG] Storedge response headers: {dict(r.headers)}")
+        
+        response_data = {
+            "storedge_url": url,
+            "storedge_status": r.status_code,
+            "storedge_headers": dict(r.headers),
+            "proxy_auth_working": True,
+            "api_credentials_set": bool(API_KEY and API_SECRET)
+        }
+        
+        try:
+            storedge_response = r.json()
+            response_data["storedge_response"] = storedge_response
+        except:
+            response_data["storedge_response_text"] = r.text[:500]
+        
+        return jsonify(response_data), 200
+        
+    except Exception as e:
+        return jsonify({
+            "error": "STOREDGE_API_ERROR",
+            "message": str(e),
+            "storedge_url": url,
+            "proxy_auth_working": True
+        }), 500
+
+
+@app.route("/debug/sample-units/<facility_id>")
+def debug_sample_units(facility_id):
+    """Debug endpoint to get sample units from a facility"""
+    guard = require_bearer(request)
+    if guard: return guard
+    
+    url = f"{BASE_URL}/v1/{facility_id}/units"
+    
+    try:
+        r = requests.get(url, auth=OAuth1(API_KEY, API_SECRET), params={"limit": 5}, timeout=60)
+        
+        if r.status_code == 200:
+            units_data = r.json()
+            return jsonify({
+                "facility_id": facility_id,
+                "sample_units_count": len(units_data.get("data", [])),
+                "sample_units": units_data.get("data", [])[:3],  # First 3 units
+                "storedge_status": r.status_code
+            }), 200
+        else:
+            return jsonify({
+                "error": "Failed to fetch units",
+                "facility_id": facility_id,
+                "storedge_status": r.status_code,
+                "storedge_response": r.text[:500]
+            }), r.status_code
+            
+    except Exception as e:
+        return jsonify({
+            "error": "STOREDGE_API_ERROR", 
+            "message": str(e),
+            "facility_id": facility_id
+        }), 500
 
 
 # === Validators ===
