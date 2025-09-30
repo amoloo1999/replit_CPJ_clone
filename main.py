@@ -515,20 +515,29 @@ def bulk_create_units(facility_id):
 @app.put("/facilities/<facility_id>/units/<unit_id>/make_rentable")
 def make_unit_rentable(facility_id, unit_id):
     """Make a single unit rentable or unrentable using the bulk_update API.
-    Body: {"rentable": true/false} - rentable is required
+    Body: {"rentable": true/false, "reason": "string"} - both required
     """
     guard = require_bearer(request)
     if guard: return guard
     
     raw_body = request.get_json(silent=True) or {}
     
-    # Validate required fields - rentable is required
+    # Validate required fields
+    validation_errors = []
+    
     if "rentable" not in raw_body:
-        return jsonify({"error": "VALIDATION_FAILED", "details": [{"field": "rentable", "message": "rentable field is required (true or false)"}]}), 400
+        validation_errors.append({"field": "rentable", "message": "rentable field is required (true or false)"})
+    elif raw_body.get("rentable") not in (True, False):
+        validation_errors.append({"field": "rentable", "message": "Must be true or false"})
+    
+    reason = raw_body.get("reason", "").strip()
+    if not reason:
+        validation_errors.append({"field": "reason", "message": "reason field is required"})
+    
+    if validation_errors:
+        return jsonify({"error": "VALIDATION_FAILED", "details": validation_errors}), 400
     
     rentable = raw_body.get("rentable")
-    if rentable not in (True, False):
-        return jsonify({"error": "VALIDATION_FAILED", "details": [{"field": "rentable", "message": "Must be true or false"}]}), 400
     
     # Use bulk_update API with single unit
     storedge_body = {
@@ -537,7 +546,8 @@ def make_unit_rentable(facility_id, unit_id):
                 "id": unit_id,
                 "rentable": rentable
             }
-        ]
+        ],
+        "reason": reason
     }
     
     url = f"{BASE_URL}/v1/{facility_id}/units/bulk_update"
@@ -557,20 +567,28 @@ def make_unit_rentable(facility_id, unit_id):
 @app.post("/facilities/<facility_id>/units/bulk_make_rentable")
 def bulk_make_units_rentable(facility_id):
     """Make multiple units rentable/unrentable using the bulk_update API.
-    Body: {"units": [{"id": "unit_id", "rentable": true/false}]}
+    Body: {"units": [{"id": "unit_id", "rentable": true/false}], "reason": "string"}
     """
     guard = require_bearer(request)
     if guard: return guard
     
     raw_body = request.get_json(silent=True) or {}
     units = raw_body.get("units", [])
+    reason = raw_body.get("reason", "").strip()
+    
+    validation_errors = []
     
     if not isinstance(units, list) or not units:
-        return jsonify({"error": "VALIDATION_FAILED", "details": [{"message": "units array is required"}]}), 400
+        validation_errors.append({"message": "units array is required"})
+    
+    if not reason:
+        validation_errors.append({"field": "reason", "message": "reason field is required"})
+    
+    if validation_errors:
+        return jsonify({"error": "VALIDATION_FAILED", "details": validation_errors}), 400
     
     # Validate and prepare units for bulk_update
     validated_units = []
-    validation_errors = []
     
     for i, unit_data in enumerate(units):
         if not isinstance(unit_data, dict):
@@ -603,7 +621,7 @@ def bulk_make_units_rentable(facility_id):
         return jsonify({"error": "VALIDATION_FAILED", "details": [{"message": "No valid units to process"}]}), 400
     
     # Use Storedge bulk_update API
-    storedge_body = {"units": validated_units}
+    storedge_body = {"units": validated_units, "reason": reason}
     
     url = f"{BASE_URL}/v1/{facility_id}/units/bulk_update"
     r = requests.put(url, json=storedge_body, auth=OAuth1(API_KEY, API_SECRET), timeout=120)
