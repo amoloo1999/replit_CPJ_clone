@@ -48,6 +48,23 @@ paths:
             minimum: 1
             maximum: 1000
           description: Number of units per page
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 1000
+          description: 'Alternative: limit number of units (use with offset)'
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+          description: 'Alternative: offset for pagination (use with limit)'
       responses:
         '200': { description: Paginated units response }
   /facilities/{facility_id}/units/count:
