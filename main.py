@@ -383,25 +383,20 @@ def facilities_short():
 
 @app.get("/facilities/<facility_id>/units")
 def list_units(facility_id):
-    """List units for a facility.
-    Docs: /docs/private/api-v1-units/
-    """
     guard = require_bearer(request)
     if guard: return guard
-    # Facility scope uses /v1/<facility_id>/units (no companies segment)
-    refresh = request.args.get("refresh") == "1"
-    cached = None if refresh else _cache_get("units", facility_id)
-    if cached:
-        return jsonify({"cached": True, **cached}), 200
-    url = f"{BASE_URL}/v1/{facility_id}/units"
+
+    page = request.args.get("page", "1")
+    per_page = request.args.get("per_page", "100")  # adjust max as needed
+
+    url = f"{BASE_URL}/v1/{facility_id}/units?page={page}&per_page={per_page}"
     r = requests.get(url, auth=OAuth1(API_KEY, API_SECRET), timeout=60)
+
     try:
         data = r.json()
     except Exception:
         return (r.text, r.status_code, {"Content-Type": "application/json"})
-    if r.status_code == 200:
-        _cache_set("units", data, facility_id)
-    return jsonify({"cached": False, "data": data}), r.status_code
+    return jsonify({"data": data}), r.status_code
 
 
 @app.put("/facilities/<facility_id>/units/bulk_update")
