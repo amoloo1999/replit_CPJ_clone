@@ -1023,6 +1023,49 @@ def search_units(facility_id):
         }), 500
 
 
+# === William Warren Group Specific Endpoints (GPT Actions Optimized) ===
+# These endpoints are pre-configured with the William Warren Group facility ID
+# to make the chatbot integration easier and more reliable.
+
+WILLIAM_WARREN_FACILITY_ID = "701235b0-d7ba-4191-932c-b3d1a182dace"
+
+@app.get("/william-warren/units")
+def get_william_warren_units():
+    """Get units at William Warren Group facility with search capabilities."""
+    guard = require_bearer(request)
+    if guard: return guard
+    
+    # Forward to the existing units endpoint with the correct facility ID
+    return list_units(WILLIAM_WARREN_FACILITY_ID)
+
+@app.get("/william-warren/units/search")
+def search_william_warren_units():
+    """Search for units at William Warren Group facility."""
+    guard = require_bearer(request)
+    if guard: return guard
+    
+    # Forward to the existing search endpoint with the correct facility ID
+    return search_units(WILLIAM_WARREN_FACILITY_ID)
+
+@app.put("/william-warren/units/<unit_id>/make-rentable")
+def make_william_warren_unit_rentable(unit_id):
+    """Make a William Warren Group unit rentable/unrentable."""
+    guard = require_bearer(request)
+    if guard: return guard
+    
+    # Forward to the existing make_rentable endpoint with the correct facility ID
+    return make_unit_rentable(WILLIAM_WARREN_FACILITY_ID, unit_id)
+
+@app.post("/william-warren/units/search-and-update")
+def search_and_update_william_warren_units():
+    """Search and update units at William Warren Group facility in one operation."""
+    guard = require_bearer(request)
+    if guard: return guard
+    
+    # Forward to the existing search_and_update endpoint with the correct facility ID
+    return search_and_update_units(WILLIAM_WARREN_FACILITY_ID)
+
+
 @app.get("/facilities/<facility_id>/units/count")
 def get_units_count(facility_id):
     """Get unit count and pagination info for a facility.
