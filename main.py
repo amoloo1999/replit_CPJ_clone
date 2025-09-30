@@ -393,15 +393,30 @@ def list_units(facility_id):
     if guard: return guard
 
     # Parse and validate pagination parameters
+    # Support both page/per_page AND limit/offset styles
     try:
-        page = max(1, int(request.args.get("page", "1")))
-    except ValueError:
-        return jsonify({"error": "INVALID_PAGE", "message": "Page must be a positive integer"}), 400
-    
-    try:
-        per_page = max(1, min(1000, int(request.args.get("per_page", "100"))))
-    except ValueError:
-        return jsonify({"error": "INVALID_PER_PAGE", "message": "Per_page must be a positive integer (max 1000)"}), 400
+        # Check for limit/offset style first
+        limit = request.args.get("limit")
+        offset = request.args.get("offset")
+        
+        if limit is not None or offset is not None:
+            # Convert limit/offset to page/per_page
+            limit = max(1, min(1000, int(limit or "100")))
+            offset = max(0, int(offset or "0"))
+            page = (offset // limit) + 1
+            per_page = limit
+        else:
+            # Use page/per_page style
+            page = max(1, int(request.args.get("page", "1")))
+            per_page = max(1, min(1000, int(request.args.get("per_page", "100"))))
+            
+    except ValueError as e:
+        return jsonify({
+            "error": "INVALID_PAGINATION", 
+            "message": "Pagination parameters must be positive integers",
+            "supported_params": "Use either (page, per_page) or (limit, offset)",
+            "details": str(e)
+        }), 400
 
     url = f"{BASE_URL}/v1/{facility_id}/units?page={page}&per_page={per_page}"
     
@@ -410,12 +425,18 @@ def list_units(facility_id):
         data = r.json()
         
         # Include pagination metadata in response
+        # Calculate offset for compatibility
+        offset = (page - 1) * per_page
+        
         response_data = {
             "data": data,
             "pagination": {
                 "page": page,
                 "per_page": per_page,
-                "requested_facility_id": facility_id
+                "limit": per_page,
+                "offset": offset,
+                "requested_facility_id": facility_id,
+                "note": "Supports both (page,per_page) and (limit,offset) parameters"
             }
         }
         
