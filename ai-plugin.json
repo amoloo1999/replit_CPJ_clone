@@ -1,0 +1,18 @@
+{
+  "schema_version": "v1",
+  "name_for_human": "Storedge Units Proxy",
+  "name_for_model": "storedge_units_proxy",
+  "description_for_human": "List facilities and manage units (create, update, make rentable) via Storedge.",
+  "description_for_model": "Use to fetch facilities, list units, and perform bulk unit operations (update/create/make rentable). Always preview changes with user before bulk_update.",
+  "auth": {
+    "type": "service_http",
+    "authorization_type": "bearer"
+  },
+  "api": {
+    "type": "openapi",
+    "url": "https://YOUR_REPL_URL/openapi.json"
+  },
+  "logo_url": "https://YOUR_REPL_URL/generated-icon.png",
+  "contact_email": "support@example.com",
+  "legal_info_url": "https://example.com/terms"
+}

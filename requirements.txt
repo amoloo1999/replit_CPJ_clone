@@ -1,0 +1,10 @@
+Flask
+requests
+requests_oauthlib
+python-dotenv
+pandas
+pyodbc>=4.0
+# SQLAlchemy>=2.0,<3.0  
+python-tds==1.16.1   # pin a version today; upgrade consciously later
+gunicorn
+

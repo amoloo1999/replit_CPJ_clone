@@ -1,0 +1,128 @@
+[
+  {
+    "bucket": 1,
+    "current_rate": 49.0,
+    "desc": "Elevator Access",
+    "standard_rate": 61.0,
+    "ug_key": "5x5x0 - SELF STORAGE - [172635]"
+  },
+  {
+    "bucket": 1,
+    "current_rate": 58.0,
+    "desc": "Elevator Access",
+    "standard_rate": 67.0,
+    "ug_key": "5x6x0 - SELF STORAGE - [172635]"
+  },
+  {
+    "bucket": 1,
+    "current_rate": 59.0,
+    "desc": "1st Floor",
+    "standard_rate": 73.0,
+    "ug_key": "5x5x0 - SELF STORAGE - [172636]"
+  },
+  {
+    "bucket": 1,
+    "current_rate": 69.0,
+    "desc": "1st Floor",
+    "standard_rate": 81.0,
+    "ug_key": "5x6x0 - SELF STORAGE - [172636]"
+  },
+  {
+    "bucket": 1,
+    "current_rate": 75.0,
+    "desc": "Elevator Access",
+    "standard_rate": 88.0,
+    "ug_key": "5x10x0 - SELF STORAGE - [172635]"
+  },
+  {
+    "bucket": 1,
+    "current_rate": 88.0,
+    "desc": "1st Floor",
+    "standard_rate": 105.0,
+    "ug_key": "5x10x0 - SELF STORAGE - [172636]"
+  },
+  {
+    "bucket": 1,
+    "current_rate": 105.0,
+    "desc": "Drive Up Access",
+    "standard_rate": 124.0,
+    "ug_key": "5x10x0 - SELF STORAGE - [169596]"
+  },
+  {
+    "bucket": 1,
+    "current_rate": 89.0,
+    "desc": "1st Floor, Climate Controlled",
+    "standard_rate": 121.0,
+    "ug_key": "5x10x0 - SELF STORAGE - [156843 - 172636]"
+  },
+  {
+    "bucket": 1,
+    "current_rate": 125.0,
+    "desc": "1st Floor, Climate Controlled",
+    "standard_rate": 145.0,
+    "ug_key": "7x10x0 - SELF STORAGE - [156843 - 172636]"
+  },
+  {
+    "bucket": 1,
+    "current_rate": 64.0,
+    "desc": "1st Floor, Climate Controlled",
+    "standard_rate": 150.0,
+    "ug_key": "7.5x10x0 - SELF STORAGE - [156843 - 172636]"
+  },
+  {
+    "bucket": 2,
+    "current_rate": 69.0,
+    "desc": "Elevator Access",
+    "standard_rate": 75.0,
+    "ug_key": "5x15x0 - SELF STORAGE - [172635]"
+  },
+  {
+    "bucket": 2,
+    "current_rate": 79.0,
+    "desc": "Elevator Access",
+    "standard_rate": 88.0,
+    "ug_key": "10x10x0 - SELF STORAGE - [172635]"
+  },
+  {
+    "bucket": 4,
+    "current_rate": 95.0,
+    "desc": "Elevator Access",
+    "standard_rate": 88.0,
+    "ug_key": "10x15x0 - SELF STORAGE - [172635]"
+  },
+  {
+    "bucket": 6,
+    "current_rate": 95.0,
+    "desc": "1st Floor",
+    "standard_rate": 71.0,
+    "ug_key": "10x10x0 - SELF STORAGE - [172636]"
+  },
+  {
+    "bucket": 6,
+    "current_rate": 65.0,
+    "desc": "1st Floor, Climate Controlled",
+    "standard_rate": 81.0,
+    "ug_key": "10x10x0 - SELF STORAGE - [156843 - 172636]"
+  },
+  {
+    "bucket": 6,
+    "current_rate": 124.0,
+    "desc": "1st Floor",
+    "standard_rate": 88.0,
+    "ug_key": "10x15x0 - SELF STORAGE - [172636]"
+  },
+  {
+    "bucket": 6,
+    "current_rate": 125.0,
+    "desc": "1st Floor, Climate Controlled",
+    "standard_rate": 101.0,
+    "ug_key": "10x15x0 - SELF STORAGE - [156843 - 172636]"
+  },
+  {
+    "bucket": 6,
+    "current_rate": 145.0,
+    "desc": "1st Floor",
+    "standard_rate": 103.0,
+    "ug_key": "10x20x0 - SELF STORAGE - [172636]"
+  }
+]

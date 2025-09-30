@@ -1,0 +1,74 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "Storedge Units Proxy",
+    "version": "1.0.0",
+    "description": "Proxy endpoints for Storedge facilities and units. All requests require Authorization: Bearer <PROXY_BEARER>."
+  },
+  "servers": [
+    { "url": "https://YOUR_REPL_URL" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [ { "bearerAuth": [] } ],
+  "paths": {
+    "/facilities/short": {
+      "get": {
+        "operationId": "listFacilitiesShort",
+        "summary": "List facilities (short form)",
+        "responses": {
+          "200": { "description": "OK" }
+        }
+      }
+    },
+    "/facilities/{facility_id}/units": {
+      "get": {
+        "operationId": "listUnits",
+        "summary": "List units for a facility",
+        "parameters": [
+          { "name": "facility_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/facilities/{facility_id}/units/bulk_update": {
+      "put": {
+        "operationId": "bulkUpdateUnits",
+        "summary": "Bulk update units (partial fields)",
+        "parameters": [
+          { "name": "facility_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["units"], "properties": { "units": { "type": "array", "items": { "type": "object" } } } } } } },
+        "responses": { "200": { "description": "Result" } }
+      }
+    },
+    "/facilities/{facility_id}/units/bulk_create": {
+      "post": {
+        "operationId": "bulkCreateUnits",
+        "summary": "Bulk create units",
+        "parameters": [
+          { "name": "facility_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["units"], "properties": { "units": { "type": "array", "items": { "type": "object" } } } } } } },
+        "responses": { "200": { "description": "Result" } }
+      }
+    },
+    "/facilities/{facility_id}/units/make_rentable": {
+      "post": {
+        "operationId": "makeUnitsRentable",
+        "summary": "Mark units rentable / update rentable status",
+        "parameters": [
+          { "name": "facility_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["units"], "properties": { "units": { "type": "array", "items": { "type": "object" } } } } } } },
+        "responses": { "200": { "description": "Result" } }
+      }
+    }
+  }
+}
