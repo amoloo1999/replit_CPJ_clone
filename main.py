@@ -406,49 +406,99 @@ def facilities_short():
 
 @app.get("/facilities/<facility_id>/units")
 def list_units(facility_id):
-    """List units for a facility with pagination support.
+    """List units for a facility with pagination and search support.
     
     Query params:
     - page: Page number (default: 1)
-    - per_page: Units per page (default: 100, max: 1000)
+    - per_page: Units per page (default: 10, max: 100 to prevent timeouts)
+    - search: Search term to filter unit names/numbers
+    - name_contains: Filter units where name contains this text
+    - unit_number_contains: Filter units where unit_number contains this text
     """
     guard = require_bearer(request)
     if guard: return guard
 
-    # Parse and validate pagination parameters
-    # Support both page/per_page AND limit/offset styles
+    # Parse and validate pagination parameters with smaller defaults
     try:
         # Check for limit/offset style first
         limit = request.args.get("limit")
         offset = request.args.get("offset")
         
         if limit is not None or offset is not None:
-            # Convert limit/offset to page/per_page
-            limit = max(1, min(1000, int(limit or "100")))
+            # Convert limit/offset to page/per_page with smaller max to prevent timeouts
+            limit = max(1, min(100, int(limit or "10")))
             offset = max(0, int(offset or "0"))
             page = (offset // limit) + 1
             per_page = limit
         else:
-            # Use page/per_page style
+            # Use page/per_page style with smaller defaults
             page = max(1, int(request.args.get("page", "1")))
-            per_page = max(1, min(1000, int(request.args.get("per_page", "100"))))
+            per_page = max(1, min(100, int(request.args.get("per_page", "10"))))
             
     except ValueError as e:
         return jsonify({
             "error": "INVALID_PAGINATION", 
             "message": "Pagination parameters must be positive integers",
             "supported_params": "Use either (page, per_page) or (limit, offset)",
-            "details": str(e)
+            "details": str(e),
+            "note": "Max per_page is 100 to prevent timeouts"
         }), 400
+    
+    # Get search parameters
+    search_term = request.args.get("search", "").strip()
+    name_contains = request.args.get("name_contains", "").strip()
+    unit_number_contains = request.args.get("unit_number_contains", "").strip()
 
-    url = f"{BASE_URL}/v1/{facility_id}/units?page={page}&per_page={per_page}"
+    # Build Storedge API URL with search parameters
+    params = {"page": page, "per_page": per_page}
+    
+    # Add search filters if provided (Storedge API may support these)
+    if search_term:
+        params["search"] = search_term
+    if name_contains:
+        params["name_contains"] = name_contains  
+    if unit_number_contains:
+        params["unit_number_contains"] = unit_number_contains
+    
+    url = f"{BASE_URL}/v1/{facility_id}/units"
     
     try:
-        r = requests.get(url, auth=OAuth1(API_KEY, API_SECRET), timeout=60)
+        r = requests.get(url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=60)
+        
+        if r.status_code != 200:
+            return jsonify({
+                "error": "STOREDGE_API_ERROR",
+                "status_code": r.status_code,
+                "response": r.text[:500]
+            }), r.status_code
+            
         data = r.json()
         
+        # Apply client-side filtering if Storedge doesn't support server-side filtering
+        units_data = data.get("data", [])
+        if (search_term or name_contains or unit_number_contains) and units_data:
+            filtered_units = []
+            for unit in units_data:
+                unit_name = str(unit.get("name", "")).lower()
+                unit_number = str(unit.get("unit_number", "")).lower()
+                
+                match = True
+                if search_term and not (search_term.lower() in unit_name or search_term.lower() in unit_number):
+                    match = False
+                if name_contains and name_contains.lower() not in unit_name:
+                    match = False
+                if unit_number_contains and unit_number_contains.lower() not in unit_number:
+                    match = False
+                    
+                if match:
+                    filtered_units.append(unit)
+            
+            # Update the data with filtered results
+            data["data"] = filtered_units
+            data["filtered_count"] = len(filtered_units)
+            data["total_before_filter"] = len(units_data)
+        
         # Include pagination metadata in response
-        # Calculate offset for compatibility
         offset = (page - 1) * per_page
         
         response_data = {
@@ -459,7 +509,8 @@ def list_units(facility_id):
                 "limit": per_page,
                 "offset": offset,
                 "requested_facility_id": facility_id,
-                "note": "Supports both (page,per_page) and (limit,offset) parameters"
+                "search_applied": bool(search_term or name_contains or unit_number_contains),
+                "note": "Supports search, name_contains, unit_number_contains filters"
             }
         }
         
@@ -630,6 +681,265 @@ def bulk_make_units_rentable(facility_id):
         return jsonify(r.json()), r.status_code
     except Exception:
         return (r.text, r.status_code, {"Content-Type": "application/json"})
+
+
+@app.post("/facilities/<facility_id>/units/search_and_update")
+def search_and_update_units(facility_id):
+    """Search for units by name/number and update their rentable status in one operation.
+    
+    This is a convenience endpoint that combines search + bulk_make_rentable.
+    
+    Body: {
+        "search_terms": ["Mail2", "Storage Unit 5", "A101"],
+        "rentable": true,
+        "reason": "Making selected units rentable",
+        "exact_match": false,
+        "max_pages_per_search": 10
+    }
+    """
+    guard = require_bearer(request)
+    if guard: return guard
+    
+    raw_body = request.get_json(silent=True) or {}
+    
+    search_terms = raw_body.get("search_terms", [])
+    rentable = raw_body.get("rentable")
+    reason = raw_body.get("reason", "").strip()
+    exact_match = raw_body.get("exact_match", False)
+    max_pages = min(50, max(1, int(raw_body.get("max_pages_per_search", 10))))
+    
+    # Validation
+    validation_errors = []
+    
+    if not isinstance(search_terms, list) or not search_terms:
+        validation_errors.append({"field": "search_terms", "message": "Must provide a non-empty array of search terms"})
+    
+    if rentable not in (True, False):
+        validation_errors.append({"field": "rentable", "message": "Must be true or false"})
+    
+    if not reason:
+        validation_errors.append({"field": "reason", "message": "Reason is required"})
+    
+    if validation_errors:
+        return jsonify({"error": "VALIDATION_FAILED", "details": validation_errors}), 400
+    
+    # Search for all units
+    all_matched_units = []
+    search_results = {}
+    
+    try:
+        for search_term in search_terms:
+            search_term = str(search_term).strip()
+            if not search_term:
+                continue
+                
+            matched_units = []
+            pages_searched = 0
+            
+            # Search through pages for this term
+            for page in range(1, max_pages + 1):
+                pages_searched = page
+                
+                url = f"{BASE_URL}/v1/{facility_id}/units"
+                params = {"page": page, "per_page": 20}
+                
+                r = requests.get(url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+                
+                if r.status_code != 200:
+                    break
+                    
+                data = r.json()
+                units = data.get("data", [])
+                
+                if not units:
+                    break
+                    
+                # Search through this page's units
+                for unit in units:
+                    unit_name = str(unit.get("name", ""))
+                    unit_number = str(unit.get("unit_number", ""))
+                    
+                    match_found = False
+                    if exact_match:
+                        if (search_term.lower() == unit_name.lower() or 
+                            search_term.lower() == unit_number.lower()):
+                            match_found = True
+                    else:
+                        if (search_term.lower() in unit_name.lower() or 
+                            search_term.lower() in unit_number.lower()):
+                            match_found = True
+                    
+                    if match_found:
+                        unit_info = {
+                            "id": unit.get("id"),
+                            "name": unit_name,
+                            "unit_number": unit_number,
+                            "current_rentable": unit.get("rentable"),
+                            "status": unit.get("status"),
+                            "search_term": search_term
+                        }
+                        matched_units.append(unit_info)
+                        all_matched_units.append(unit_info)
+                
+                # If exact match and we found something, stop searching pages
+                if matched_units and exact_match:
+                    break
+            
+            search_results[search_term] = {
+                "matches": len(matched_units),
+                "pages_searched": pages_searched,
+                "units": matched_units
+            }
+        
+        if not all_matched_units:
+            return jsonify({
+                "error": "NO_UNITS_FOUND",
+                "message": "None of the search terms matched any units",
+                "search_results": search_results
+            }), 404
+        
+        # Prepare units for bulk update
+        units_to_update = [
+            {"id": unit["id"], "rentable": rentable}
+            for unit in all_matched_units
+            if unit["id"]  # Only include units with valid IDs
+        ]
+        
+        if not units_to_update:
+            return jsonify({
+                "error": "NO_VALID_UNIT_IDS",
+                "message": "Found matching units but none have valid IDs",
+                "search_results": search_results
+            }), 400
+        
+        # Perform bulk update using existing bulk_update API
+        storedge_body = {"units": units_to_update, "reason": reason}
+        
+        url = f"{BASE_URL}/v1/{facility_id}/units/bulk_update"
+        r = requests.put(url, json=storedge_body, auth=OAuth1(API_KEY, API_SECRET), timeout=120)
+        
+        response_data = {
+            "search_results": search_results,
+            "total_units_found": len(all_matched_units),
+            "units_updated": len(units_to_update),
+            "rentable_status": rentable,
+            "reason": reason,
+            "storedge_response_status": r.status_code
+        }
+        
+        try:
+            storedge_response = r.json()
+            response_data["storedge_response"] = storedge_response
+        except:
+            response_data["storedge_response_text"] = r.text[:500]
+        
+        return jsonify(response_data), r.status_code
+        
+    except Exception as e:
+        return jsonify({
+            "error": "SEARCH_AND_UPDATE_FAILED",
+            "message": str(e),
+            "search_results": search_results if 'search_results' in locals() else {}
+        }), 500
+
+
+@app.get("/facilities/<facility_id>/units/search")
+def search_units(facility_id):
+    """Search for units by name or unit number across all pages.
+    
+    This endpoint will search through multiple pages to find matching units,
+    returning just the matching results with their IDs for bulk operations.
+    
+    Query params:
+    - search: Search term to find in unit name or unit_number
+    - exact_match: If true, requires exact match (default: false, partial match)
+    - max_pages: Maximum pages to search through (default: 10, max: 50)
+    """
+    guard = require_bearer(request)
+    if guard: return guard
+    
+    search_term = request.args.get("search", "").strip()
+    exact_match = request.args.get("exact_match", "false").lower() == "true"
+    max_pages = min(50, max(1, int(request.args.get("max_pages", "10"))))
+    
+    if not search_term:
+        return jsonify({
+            "error": "MISSING_SEARCH_TERM",
+            "message": "Provide a 'search' parameter to find units"
+        }), 400
+    
+    matched_units = []
+    pages_searched = 0
+    
+    try:
+        for page in range(1, max_pages + 1):
+            pages_searched = page
+            
+            # Use small page size to avoid timeouts
+            url = f"{BASE_URL}/v1/{facility_id}/units"
+            params = {"page": page, "per_page": 20}  # Small batches
+            
+            r = requests.get(url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+            
+            if r.status_code != 200:
+                break  # Stop on API error
+                
+            data = r.json()
+            units = data.get("data", [])
+            
+            if not units:  # No more units
+                break
+                
+            # Search through this page's units
+            for unit in units:
+                unit_name = str(unit.get("name", ""))
+                unit_number = str(unit.get("unit_number", ""))
+                
+                if exact_match:
+                    if (search_term.lower() == unit_name.lower() or 
+                        search_term.lower() == unit_number.lower()):
+                        matched_units.append({
+                            "id": unit.get("id"),
+                            "name": unit_name,
+                            "unit_number": unit_number,
+                            "rentable": unit.get("rentable"),
+                            "status": unit.get("status"),
+                            "found_on_page": page
+                        })
+                else:
+                    if (search_term.lower() in unit_name.lower() or 
+                        search_term.lower() in unit_number.lower()):
+                        matched_units.append({
+                            "id": unit.get("id"),
+                            "name": unit_name,
+                            "unit_number": unit_number,
+                            "rentable": unit.get("rentable"),
+                            "status": unit.get("status"),
+                            "found_on_page": page
+                        })
+            
+            # If we found matches and only searching for one, we can stop early
+            if matched_units and exact_match:
+                break
+        
+        return jsonify({
+            "search_term": search_term,
+            "exact_match": exact_match,
+            "matches_found": len(matched_units),
+            "pages_searched": pages_searched,
+            "max_pages": max_pages,
+            "units": matched_units,
+            "facility_id": facility_id,
+            "note": "Use the 'id' field from results for bulk_make_rentable operations"
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            "error": "SEARCH_FAILED",
+            "message": str(e),
+            "search_term": search_term,
+            "pages_searched": pages_searched
+        }), 500
 
 
 @app.get("/facilities/<facility_id>/units/count")
