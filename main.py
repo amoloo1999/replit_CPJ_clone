@@ -1023,6 +1023,318 @@ def search_units(facility_id):
         }), 500
 
 
+# === Universal Endpoints (GPT Actions Optimized for Any Facility) ===
+# These endpoints handle natural language requests like "update unit Mail2 at William Warren Group"
+
+def find_facility_by_name(facility_name, exact_match=False):
+    """Find a facility by name (partial or exact match)."""
+    try:
+        # Get all facilities
+        url = f"{BASE_URL}/v1/companies/{COMPANY_ID}/facilities/short"
+        r = requests.get(url, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+        
+        if r.status_code != 200:
+            return None
+            
+        data = r.json()
+        facilities = data.get("facilities", [])
+        
+        # Search for matching facility
+        facility_name_lower = facility_name.lower()
+        
+        for facility in facilities:
+            name = facility.get("facility_name", "").lower()
+            
+            if exact_match:
+                if facility_name_lower == name:
+                    return facility
+            else:
+                # Partial match - check if search term is in facility name
+                if facility_name_lower in name or name in facility_name_lower:
+                    return facility
+        
+        return None
+        
+    except Exception as e:
+        print(f"Error finding facility: {e}")
+        return None
+
+@app.post("/universal/find-and-update-unit")
+def find_and_update_unit_universal():
+    """Universal endpoint to find and update unit at any facility using natural language."""
+    guard = require_bearer(request)
+    if guard: return guard
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "MISSING_DATA", "message": "Request body required"}), 400
+        
+        facility_name = data.get("facility_name", "").strip()
+        unit_identifier = data.get("unit_identifier", "").strip()
+        rentable = data.get("rentable")
+        reason = data.get("reason", "Updated via universal API")
+        exact_facility_match = data.get("exact_facility_match", False)
+        exact_unit_match = data.get("exact_unit_match", False)
+        
+        if not facility_name or not unit_identifier or rentable is None:
+            return jsonify({
+                "error": "MISSING_REQUIRED_FIELDS",
+                "message": "facility_name, unit_identifier, and rentable are required"
+            }), 400
+        
+        # Step 1: Find the facility
+        facility = find_facility_by_name(facility_name, exact_facility_match)
+        
+        if not facility:
+            return jsonify({
+                "success": False,
+                "facility_found": False,
+                "message": f"No facility found matching '{facility_name}'",
+                "errors": [f"Facility '{facility_name}' not found"]
+            }), 404
+        
+        facility_id = facility["id"]
+        facility_display_name = facility["facility_name"]
+        
+        # Step 2: Search for units in that facility
+        search_url = f"{BASE_URL}/v1/{facility_id}/units"
+        found_units = []
+        pages_searched = 0
+        
+        # Search through multiple pages to find the unit
+        for page in range(1, 11):  # Search up to 10 pages
+            pages_searched = page
+            params = {"page": page, "per_page": 50}
+            
+            r = requests.get(search_url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+            
+            if r.status_code != 200:
+                break
+                
+            page_data = r.json()
+            units = page_data.get("data", [])
+            
+            if not units:  # No more units
+                break
+            
+            # Search this page for matching units
+            for unit in units:
+                unit_name = str(unit.get("name", ""))
+                unit_number = str(unit.get("unit_number", ""))
+                
+                if exact_unit_match:
+                    if (unit_identifier.lower() == unit_name.lower() or 
+                        unit_identifier.lower() == unit_number.lower()):
+                        found_units.append(unit)
+                else:
+                    if (unit_identifier.lower() in unit_name.lower() or 
+                        unit_identifier.lower() in unit_number.lower()):
+                        found_units.append(unit)
+        
+        if not found_units:
+            return jsonify({
+                "success": False,
+                "facility_found": True,
+                "facility_name": facility_display_name,
+                "facility_id": facility_id,
+                "units_found": 0,
+                "message": f"No units found matching '{unit_identifier}' at {facility_display_name}",
+                "errors": [f"Unit '{unit_identifier}' not found"]
+            }), 404
+        
+        # Step 3: Update each found unit
+        updated_units = []
+        errors = []
+        
+        for unit in found_units:
+            unit_id = unit["id"]
+            previous_rentable = unit.get("rentable", None)
+            
+            try:
+                # Update the unit
+                update_url = f"{BASE_URL}/v1/{facility_id}/units/{unit_id}"
+                update_payload = {"unit": {"rentable": rentable}}
+                
+                r = requests.put(update_url, json=update_payload, 
+                               auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+                
+                if r.status_code == 200:
+                    unit_data = r.json()
+                    updated_units.append({
+                        "id": unit_id,
+                        "name": unit.get("name", ""),
+                        "unit_number": unit.get("unit_number", ""),
+                        "rentable": unit_data.get("rentable"),
+                        "previous_rentable": previous_rentable
+                    })
+                else:
+                    errors.append(f"Failed to update unit {unit.get('name', unit_id)}: {r.text}")
+                    
+            except Exception as e:
+                errors.append(f"Error updating unit {unit.get('name', unit_id)}: {str(e)}")
+        
+        # Return results
+        return jsonify({
+            "success": len(updated_units) > 0,
+            "facility_found": True,
+            "facility_name": facility_display_name,
+            "facility_id": facility_id,
+            "units_found": len(found_units),
+            "units_updated": len(updated_units),
+            "rentable_status": rentable,
+            "updated_units": updated_units,
+            "errors": errors,
+            "message": f"Updated {len(updated_units)} of {len(found_units)} units at {facility_display_name}"
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": "SERVER_ERROR",
+            "message": f"Server error: {str(e)}"
+        }), 500
+
+@app.get("/universal/search-units-by-facility-name")
+def search_units_by_facility_name():
+    """Search for units using facility name instead of facility ID."""
+    guard = require_bearer(request)
+    if guard: return guard
+    
+    facility_name = request.args.get("facility_name", "").strip()
+    unit_search = request.args.get("unit_search", "").strip()
+    exact_facility_match = request.args.get("exact_facility_match", "false").lower() == "true"
+    exact_unit_match = request.args.get("exact_unit_match", "false").lower() == "true"
+    max_pages = min(20, max(1, int(request.args.get("max_pages", "5"))))
+    
+    if not facility_name:
+        return jsonify({"error": "MISSING_FACILITY_NAME", "message": "facility_name parameter required"}), 400
+    
+    # Find the facility
+    facility = find_facility_by_name(facility_name, exact_facility_match)
+    
+    if not facility:
+        return jsonify({
+            "facility_found": False,
+            "message": f"No facility found matching '{facility_name}'"
+        }), 404
+    
+    facility_id = facility["id"]
+    facility_display_name = facility["facility_name"]
+    
+    # Search for units
+    matching_units = []
+    total_units = 0
+    
+    try:
+        for page in range(1, max_pages + 1):
+            url = f"{BASE_URL}/v1/{facility_id}/units"
+            params = {"page": page, "per_page": 50}
+            
+            r = requests.get(url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+            
+            if r.status_code != 200:
+                break
+                
+            data = r.json()
+            units = data.get("data", [])
+            
+            if not units:
+                break
+                
+            total_units += len(units)
+            
+            # Filter units if search term provided
+            if unit_search:
+                for unit in units:
+                    unit_name = str(unit.get("name", ""))
+                    unit_number = str(unit.get("unit_number", ""))
+                    
+                    if exact_unit_match:
+                        if (unit_search.lower() == unit_name.lower() or 
+                            unit_search.lower() == unit_number.lower()):
+                            matching_units.append(unit)
+                    else:
+                        if (unit_search.lower() in unit_name.lower() or 
+                            unit_search.lower() in unit_number.lower()):
+                            matching_units.append(unit)
+            else:
+                # No search filter - include all units
+                matching_units.extend(units)
+        
+        return jsonify({
+            "facility_found": True,
+            "facility_name": facility_display_name,
+            "facility_id": facility_id,
+            "total_units": total_units,
+            "matching_units": len(matching_units),
+            "units": matching_units[:100]  # Limit to first 100 matches
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            "error": "SEARCH_ERROR",
+            "message": f"Error searching units: {str(e)}"
+        }), 500
+
+@app.post("/universal/make-unit-unrentable")
+def make_unit_unrentable_universal():
+    """Simplified endpoint to make units unrentable at any facility."""
+    guard = require_bearer(request)
+    if guard: return guard
+    
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "MISSING_DATA", "message": "Request body required"}), 400
+    
+    # Add default values and forward to main universal endpoint
+    update_data = {
+        "facility_name": data.get("facility_name"),
+        "unit_identifier": data.get("unit_identifier"), 
+        "rentable": False,
+        "reason": data.get("reason", "Made unrentable per user request"),
+        "exact_facility_match": False,
+        "exact_unit_match": False
+    }
+    
+    # Temporarily store the original request
+    original_request_json = request.get_json
+    request.get_json = lambda: update_data
+    
+    try:
+        return find_and_update_unit_universal()
+    finally:
+        request.get_json = original_request_json
+
+@app.post("/universal/make-unit-rentable")  
+def make_unit_rentable_universal():
+    """Simplified endpoint to make units rentable at any facility."""
+    guard = require_bearer(request)
+    if guard: return guard
+    
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "MISSING_DATA", "message": "Request body required"}), 400
+    
+    # Add default values and forward to main universal endpoint
+    update_data = {
+        "facility_name": data.get("facility_name"),
+        "unit_identifier": data.get("unit_identifier"),
+        "rentable": True, 
+        "reason": data.get("reason", "Made rentable per user request"),
+        "exact_facility_match": False,
+        "exact_unit_match": False
+    }
+    
+    # Temporarily store the original request
+    original_request_json = request.get_json
+    request.get_json = lambda: update_data
+    
+    try:
+        return find_and_update_unit_universal()
+    finally:
+        request.get_json = original_request_json
+
 # === William Warren Group Specific Endpoints (GPT Actions Optimized) ===
 # These endpoints are pre-configured with the William Warren Group facility ID
 # to make the chatbot integration easier and more reliable.
