@@ -565,8 +565,9 @@ def bulk_create_units(facility_id):
 
 @app.put("/facilities/<facility_id>/units/<unit_id>/make_rentable")
 def make_unit_rentable(facility_id, unit_id):
-    """Make a single unit rentable or unrentable using the bulk_update API.
-    Body: {"rentable": true/false, "reason": "string"} - both required
+    """Make a single unit rentable or unrentable using direct PUT method.
+    Body: {"rentable": true/false} - rentable field required
+    Note: reason field is optional for the direct PUT endpoint
     """
     guard = require_bearer(request)
     if guard: return guard
@@ -581,34 +582,27 @@ def make_unit_rentable(facility_id, unit_id):
     elif raw_body.get("rentable") not in (True, False):
         validation_errors.append({"field": "rentable", "message": "Must be true or false"})
     
-    reason = raw_body.get("reason", "").strip()
-    if not reason:
-        validation_errors.append({"field": "reason", "message": "reason field is required"})
-    
     if validation_errors:
         return jsonify({"error": "VALIDATION_FAILED", "details": validation_errors}), 400
     
     rentable = raw_body.get("rentable")
     
-    # Use bulk_update API with single unit
+    # Use direct PUT to individual unit endpoint
     storedge_body = {
-        "units": [
-            {
-                "id": unit_id,
-                "rentable": rentable
-            }
-        ],
-        "reason": reason
+        "unit": {
+            "rentable": rentable
+        }
     }
     
-    url = f"{BASE_URL}/v1/{facility_id}/units/bulk_update"
+    url = f"{BASE_URL}/v1/{facility_id}/units/{unit_id}"
     r = requests.put(url, json=storedge_body, auth=OAuth1(API_KEY, API_SECRET), timeout=60)
     
     try:
         response_data = r.json()
-        # Return the first unit from the response since we only updated one
-        if r.status_code == 200 and "units" in response_data and response_data["units"]:
-            return jsonify(response_data["units"][0]), r.status_code
+        # Return the unit data from the response
+        if r.status_code == 200:
+            unit_data = response_data.get("unit", response_data.get("data", response_data))
+            return jsonify(unit_data), r.status_code
         else:
             return jsonify(response_data), r.status_code
     except Exception:
@@ -617,28 +611,25 @@ def make_unit_rentable(facility_id, unit_id):
 
 @app.post("/facilities/<facility_id>/units/bulk_make_rentable")
 def bulk_make_units_rentable(facility_id):
-    """Make multiple units rentable/unrentable using the bulk_update API.
-    Body: {"units": [{"id": "unit_id", "rentable": true/false}], "reason": "string"}
+    """Make multiple units rentable/unrentable using individual PUT calls.
+    Body: {"units": [{"id": "unit_id", "rentable": true/false}], "reason": "optional"}
     """
     guard = require_bearer(request)
     if guard: return guard
     
     raw_body = request.get_json(silent=True) or {}
     units = raw_body.get("units", [])
-    reason = raw_body.get("reason", "").strip()
+    reason = raw_body.get("reason", "").strip()  # Optional for individual PUT calls
     
     validation_errors = []
     
     if not isinstance(units, list) or not units:
         validation_errors.append({"message": "units array is required"})
-    
-    if not reason:
-        validation_errors.append({"field": "reason", "message": "reason field is required"})
-    
+        
     if validation_errors:
         return jsonify({"error": "VALIDATION_FAILED", "details": validation_errors}), 400
     
-    # Validate and prepare units for bulk_update
+    # Validate units
     validated_units = []
     
     for i, unit_data in enumerate(units):
@@ -671,16 +662,68 @@ def bulk_make_units_rentable(facility_id):
     if not validated_units:
         return jsonify({"error": "VALIDATION_FAILED", "details": [{"message": "No valid units to process"}]}), 400
     
-    # Use Storedge bulk_update API
-    storedge_body = {"units": validated_units, "reason": reason}
+    # Use individual PUT calls to update each unit
+    updated_units = []
+    failed_units = []
     
-    url = f"{BASE_URL}/v1/{facility_id}/units/bulk_update"
-    r = requests.put(url, json=storedge_body, auth=OAuth1(API_KEY, API_SECRET), timeout=120)
+    for unit_update in validated_units:
+        unit_id = unit_update["id"]
+        
+        # Use direct PUT to individual unit endpoint
+        storedge_body = {
+            "unit": {
+                "rentable": unit_update["rentable"]
+            }
+        }
+        
+        try:
+            url = f"{BASE_URL}/v1/{facility_id}/units/{unit_id}"
+            r = requests.put(url, json=storedge_body, auth=OAuth1(API_KEY, API_SECRET), timeout=60)
+            
+            if r.status_code == 200:
+                response_json = r.json()
+                unit_data = response_json.get("unit", response_json.get("data", response_json))
+                updated_units.append({
+                    "id": unit_id,
+                    "status": "updated",
+                    "unit": unit_data
+                })
+            else:
+                failed_units.append({
+                    "id": unit_id,
+                    "status": "failed",
+                    "status_code": r.status_code,
+                    "error": r.text[:200]
+                })
+        except Exception as e:
+            failed_units.append({
+                "id": unit_id,
+                "status": "error",
+                "error": str(e)
+            })
     
-    try:
-        return jsonify(r.json()), r.status_code
-    except Exception:
-        return (r.text, r.status_code, {"Content-Type": "application/json"})
+    # Determine overall success
+    success_count = len(updated_units)
+    total_attempted = len(validated_units)
+    overall_success = success_count > 0
+    
+    response_data = {
+        "total_units_requested": len(units),
+        "units_attempted": total_attempted,
+        "units_updated_successfully": success_count,
+        "units_failed": len(failed_units),
+        "reason": reason,
+        "updated_units": updated_units,
+        "failed_units": failed_units
+    }
+    
+    # Return 200 if any units were updated successfully, 207 for partial success, 400 for total failure
+    if overall_success:
+        status_code = 200 if len(failed_units) == 0 else 207  # 207 = Multi-Status for partial success
+    else:
+        status_code = 400  # All failed
+        
+    return jsonify(response_data), status_code
 
 
 @app.post("/facilities/<facility_id>/units/search_and_update")
@@ -812,28 +855,66 @@ def search_and_update_units(facility_id):
                 "search_results": search_results
             }), 400
         
-        # Perform bulk update using existing bulk_update API
-        storedge_body = {"units": units_to_update, "reason": reason}
+        # Perform individual updates using direct PUT method (works around bulk_update 403 issue)
+        updated_units = []
+        failed_units = []
         
-        url = f"{BASE_URL}/v1/{facility_id}/units/bulk_update"
-        r = requests.put(url, json=storedge_body, auth=OAuth1(API_KEY, API_SECRET), timeout=120)
+        for unit_update in units_to_update:
+            unit_id = unit_update["id"]
+            
+            # Use direct PUT to individual unit endpoint
+            storedge_body = {
+                "unit": {
+                    "rentable": unit_update["rentable"]
+                }
+            }
+            
+            try:
+                url = f"{BASE_URL}/v1/{facility_id}/units/{unit_id}"
+                r = requests.put(url, json=storedge_body, auth=OAuth1(API_KEY, API_SECRET), timeout=60)
+                
+                if r.status_code == 200:
+                    response_json = r.json()
+                    unit_data = response_json.get("unit", response_json.get("data", response_json))
+                    updated_units.append({
+                        "id": unit_id,
+                        "status": "updated",
+                        "unit": unit_data
+                    })
+                else:
+                    failed_units.append({
+                        "id": unit_id,
+                        "status": "failed",
+                        "status_code": r.status_code,
+                        "error": r.text[:200]
+                    })
+            except Exception as e:
+                failed_units.append({
+                    "id": unit_id,
+                    "status": "error",
+                    "error": str(e)
+                })
+        
+        # Determine overall success
+        success_count = len(updated_units)
+        total_attempted = len(units_to_update)
+        overall_success = success_count > 0
         
         response_data = {
             "search_results": search_results,
             "total_units_found": len(all_matched_units),
-            "units_updated": len(units_to_update),
+            "units_attempted": total_attempted,
+            "units_updated_successfully": success_count,
+            "units_failed": len(failed_units),
             "rentable_status": rentable,
             "reason": reason,
-            "storedge_response_status": r.status_code
+            "updated_units": updated_units,
+            "failed_units": failed_units
         }
         
-        try:
-            storedge_response = r.json()
-            response_data["storedge_response"] = storedge_response
-        except:
-            response_data["storedge_response_text"] = r.text[:500]
-        
-        return jsonify(response_data), r.status_code
+        # Return 200 if any units were updated successfully, otherwise the appropriate error status
+        status_code = 200 if overall_success else (207 if failed_units else 500)
+        return jsonify(response_data), status_code
         
     except Exception as e:
         return jsonify({
