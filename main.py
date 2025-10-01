@@ -1237,7 +1237,7 @@ def search_units_by_facility_name():
                 break
                 
             data = r.json()
-            units = data.get("data", {}).get("units", [])
+            units = data.get("units", [])
             
             if not units:
                 break
@@ -1408,7 +1408,7 @@ def search_william_warren_units_by_dimensions():
                 break
                 
             data = r.json()
-            units = data.get("data", {}).get("units", [])
+            units = data.get("units", [])
             
             if not units:
                 break
@@ -1542,7 +1542,7 @@ def search_william_warren_units_by_dimensions_and_update():
                 break
                 
             data = r.json()
-            units = data.get("data", {}).get("units", [])
+            units = data.get("units", [])
             
             if not units:
                 break
