@@ -792,7 +792,7 @@ def search_and_update_units(facility_id):
                     break
                     
                 data = r.json()
-                units = data.get("data", {}).get("units", [])
+                units = data.get("units", [])
                 
                 if not units:
                     break
@@ -966,7 +966,7 @@ def search_units(facility_id):
                 break  # Stop on API error
                 
             data = r.json()
-            units = data.get("data", {}).get("units", [])
+            units = data.get("units", [])
             
             if not units:  # No more units
                 break
