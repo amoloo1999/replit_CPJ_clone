@@ -475,7 +475,7 @@ def list_units(facility_id):
         data = r.json()
         
         # Apply client-side filtering if Storedge doesn't support server-side filtering
-        units_data = data.get("units", [])
+        units_data = data.get("data", {}).get("units", [])
         if (search_term or name_contains or unit_number_contains) and units_data:
             filtered_units = []
             for unit in units_data:
@@ -792,7 +792,7 @@ def search_and_update_units(facility_id):
                     break
                     
                 data = r.json()
-                units = data.get("units", [])
+                units = data.get("data", {}).get("units", [])
                 
                 if not units:
                     break
@@ -966,7 +966,7 @@ def search_units(facility_id):
                 break  # Stop on API error
                 
             data = r.json()
-            units = data.get("units", [])
+            units = data.get("data", {}).get("units", [])
             
             if not units:  # No more units
                 break
@@ -1113,7 +1113,7 @@ def find_and_update_unit_universal():
                 break
                 
             page_data = r.json()
-            units = page_data.get("units", [])
+            units = page_data.get("data", {}).get("units", [])
             
             if not units:  # No more units
                 break
@@ -1237,7 +1237,7 @@ def search_units_by_facility_name():
                 break
                 
             data = r.json()
-            units = data.get("units", [])
+            units = data.get("data", {}).get("units", [])
             
             if not units:
                 break
@@ -1408,7 +1408,7 @@ def search_william_warren_units_by_dimensions():
                 break
                 
             data = r.json()
-            units = data.get("units", [])
+            units = data.get("data", {}).get("units", [])
             
             if not units:
                 break
@@ -1542,7 +1542,7 @@ def search_william_warren_units_by_dimensions_and_update():
                 break
                 
             data = r.json()
-            units = data.get("units", [])
+            units = data.get("data", {}).get("units", [])
             
             if not units:
                 break
