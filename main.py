@@ -475,7 +475,7 @@ def list_units(facility_id):
         data = r.json()
         
         # Apply client-side filtering if Storedge doesn't support server-side filtering
-        units_data = data.get("data", {}).get("units", [])
+        units_data = data.get("units", [])
         if (search_term or name_contains or unit_number_contains) and units_data:
             filtered_units = []
             for unit in units_data:
@@ -1113,7 +1113,7 @@ def find_and_update_unit_universal():
                 break
                 
             page_data = r.json()
-            units = page_data.get("data", {}).get("units", [])
+            units = page_data.get("units", [])
             
             if not units:  # No more units
                 break
@@ -1513,17 +1513,11 @@ def search_william_warren_units_by_dimensions_and_update():
     reason = body.get("reason", "")
     max_pages = min(20, max(1, body.get("max_pages", 10)))
     
-    # SAFETY FEATURE: Preview mode (default: true for safety)
-    preview_only = body.get("preview_only", True)
-    confirmed_unit_ids = body.get("confirmed_unit_ids", [])
+    if rentable not in (True, False):
+        return jsonify({"error": "RENTABLE_REQUIRED", "message": "rentable must be true or false"}), 400
     
-    # Validation - only required for actual updates, not previews
-    if not preview_only:
-        if rentable not in (True, False):
-            return jsonify({"error": "RENTABLE_REQUIRED", "message": "rentable must be true or false"}), 400
-        
-        if not reason.strip():
-            return jsonify({"error": "REASON_REQUIRED", "message": "reason is required for updates"}), 400
+    if not reason.strip():
+        return jsonify({"error": "REASON_REQUIRED", "message": "reason is required for updates"}), 400
     
     # First, search for matching units
     matching_units = []
@@ -1588,52 +1582,11 @@ def search_william_warren_units_by_dimensions_and_update():
                 if match:
                     matching_units.append(unit)
         
-        # PREVIEW MODE: Just return what would be updated for user confirmation
-        if preview_only:
-            preview_units = []
-            for unit in matching_units:
-                preview_units.append({
-                    "id": unit.get("id"),
-                    "name": unit.get("name"),
-                    "unit_number": unit.get("unit_number"),
-                    "width": unit.get("width"),
-                    "length": unit.get("length"),
-                    "height": unit.get("height"),
-                    "size": unit.get("size"),
-                    "description": unit.get("description"),
-                    "current_rentable": unit.get("rentable"),
-                    "status": unit.get("status"),
-                    "unit_amenities": [amenity.get("name") for amenity in unit.get("unit_amenities", [])]
-                })
-            
-            return jsonify({
-                "preview_mode": True,
-                "message": "PREVIEW: These units would be updated. Confirm to proceed.",
-                "search_criteria": {
-                    "width": width,
-                    "length": length,
-                    "height": height,
-                    "description_contains": description_contains,
-                    "amenity_names": amenity_names,
-                    "unit_name_starts_with": unit_name_starts_with
-                },
-                "total_units_found": len(matching_units),
-                "pages_searched": pages_searched,
-                "units_to_update": preview_units,
-                "confirmation_required": True,
-                "next_step": "Send same request with preview_only: false and confirmed_unit_ids: [list of IDs to update]"
-            })
-        
-        # UPDATE MODE: Filter to only confirmed units if specified
-        units_to_update = matching_units
-        if confirmed_unit_ids:
-            units_to_update = [unit for unit in matching_units if unit.get("id") in confirmed_unit_ids]
-        
-        # Now update each unit
+        # Now update each matching unit
         updated_units = []
         failed_units = []
         
-        for unit in units_to_update:
+        for unit in matching_units:
             try:
                 unit_id = unit.get("id")
                 unit_name = unit.get("name")
