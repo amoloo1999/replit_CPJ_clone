@@ -475,7 +475,7 @@ def list_units(facility_id):
         data = r.json()
         
         # Apply client-side filtering if Storedge doesn't support server-side filtering
-        units_data = data.get("units", [])
+        units_data = data.get("data", {}).get("units", [])
         if (search_term or name_contains or unit_number_contains) and units_data:
             filtered_units = []
             for unit in units_data:
@@ -749,7 +749,7 @@ def search_and_update_units(facility_id):
     rentable = raw_body.get("rentable")
     reason = raw_body.get("reason", "").strip()
     exact_match = raw_body.get("exact_match", False)
-    max_pages = min(50, max(1, int(raw_body.get("max_pages_per_search", 10))))
+    max_pages = min(50, max(1, int(raw_body.get("max_pages_per_search", 15))))
     
     # Validation
     validation_errors = []
@@ -784,7 +784,7 @@ def search_and_update_units(facility_id):
                 pages_searched = page
                 
                 url = f"{BASE_URL}/v1/{facility_id}/units"
-                params = {"page": page, "per_page": 20}
+                params = {"page": page, "per_page": 50}
                 
                 r = requests.get(url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
                 
@@ -941,7 +941,7 @@ def search_units(facility_id):
     
     search_term = request.args.get("search", "").strip()
     exact_match = request.args.get("exact_match", "false").lower() == "true"
-    max_pages = min(50, max(1, int(request.args.get("max_pages", "10"))))
+    max_pages = min(50, max(1, int(request.args.get("max_pages", "15"))))
     
     if not search_term:
         return jsonify({
@@ -956,9 +956,9 @@ def search_units(facility_id):
         for page in range(1, max_pages + 1):
             pages_searched = page
             
-            # Use small page size to avoid timeouts
+            # Use manageable page size for GPT processing
             url = f"{BASE_URL}/v1/{facility_id}/units"
-            params = {"page": page, "per_page": 20}  # Small batches
+            params = {"page": page, "per_page": 50}  # Manageable batches
             
             r = requests.get(url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
             
@@ -1113,7 +1113,7 @@ def find_and_update_unit_universal():
                 break
                 
             page_data = r.json()
-            units = page_data.get("units", [])
+            units = page_data.get("data", {}).get("units", [])
             
             if not units:  # No more units
                 break
@@ -1368,6 +1368,84 @@ def make_william_warren_unit_rentable(unit_id):
     # Forward to the existing make_rentable endpoint with the correct facility ID
     return make_unit_rentable(WILLIAM_WARREN_FACILITY_ID, unit_id)
 
+@app.post("/william-warren/units/search-by-name-optimized") 
+def search_units_by_name_optimized():
+    """Optimized search that finds units efficiently without overwhelming ChatGPT.
+    
+    For 8.5x11 units like 03A, 11A, etc., this searches the right pages directly.
+    """
+    guard = require_bearer(request)
+    if guard: return guard
+    
+    body = request.get_json()
+    if not body:
+        return jsonify({"error": "JSON_REQUIRED"}), 400
+    
+    unit_names = body.get("unit_names", [])
+    if not unit_names:
+        return jsonify({"error": "UNIT_NAMES_REQUIRED", "message": "Provide array of unit names to find"}), 400
+    
+    # Check if these are 8.5x11 units (##A pattern)
+    is_eight_five_pattern = all(len(name) == 3 and name.endswith('A') and name[:2].isdigit() for name in unit_names)
+    
+    found_units = []
+    
+    if is_eight_five_pattern:
+        # These are 8.5x11 units - search pages 7-8 directly
+        search_pages = [7, 8]
+        print(f"[OPTIMIZED] Detected 8.5x11 pattern, searching pages {search_pages}")
+    else:
+        # General search - start from page 1
+        search_pages = list(range(1, 16))  # Search up to 15 pages
+    
+    try:
+        for page in search_pages:
+            url = f"{BASE_URL}/v1/{WILLIAM_WARREN_FACILITY_ID}/units"
+            params = {"page": page, "per_page": 50}
+            
+            r = requests.get(url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+            
+            if r.status_code != 200:
+                continue
+                
+            data = r.json()
+            units = data.get("units", [])
+            
+            if not units:
+                continue
+            
+            # Search this page for our target units
+            for unit in units:
+                unit_name = str(unit.get("name", ""))
+                
+                if unit_name in unit_names:
+                    found_units.append({
+                        "id": unit.get("id"),
+                        "name": unit_name,
+                        "unit_number": unit.get("unit_number", ""),
+                        "size": unit.get("size", ""),
+                        "rentable": unit.get("rentable"),
+                        "status": unit.get("status"),
+                        "found_on_page": page
+                    })
+            
+            # If we found all units, stop searching
+            if len(found_units) >= len(unit_names):
+                break
+        
+        return jsonify({
+            "unit_names_requested": unit_names,
+            "units_found": len(found_units),
+            "units": found_units,
+            "optimization_used": "8.5x11_pattern" if is_eight_five_pattern else "general_search"
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "error": "OPTIMIZED_SEARCH_ERROR",
+            "message": str(e)
+        }), 500
+
 @app.post("/william-warren/units/search-and-update")
 def search_and_update_william_warren_units():
     """Search and update units at William Warren Group facility in one operation."""
@@ -1513,11 +1591,17 @@ def search_william_warren_units_by_dimensions_and_update():
     reason = body.get("reason", "")
     max_pages = min(20, max(1, body.get("max_pages", 10)))
     
-    if rentable not in (True, False):
-        return jsonify({"error": "RENTABLE_REQUIRED", "message": "rentable must be true or false"}), 400
+    # SAFETY FEATURE: Preview mode (default: true for safety)
+    preview_only = body.get("preview_only", True)
+    confirmed_unit_ids = body.get("confirmed_unit_ids", [])
     
-    if not reason.strip():
-        return jsonify({"error": "REASON_REQUIRED", "message": "reason is required for updates"}), 400
+    # Validation - only required for actual updates, not previews
+    if not preview_only:
+        if rentable not in (True, False):
+            return jsonify({"error": "RENTABLE_REQUIRED", "message": "rentable must be true or false"}), 400
+        
+        if not reason.strip():
+            return jsonify({"error": "REASON_REQUIRED", "message": "reason is required for updates"}), 400
     
     # First, search for matching units
     matching_units = []
@@ -1582,11 +1666,52 @@ def search_william_warren_units_by_dimensions_and_update():
                 if match:
                     matching_units.append(unit)
         
-        # Now update each matching unit
+        # PREVIEW MODE: Just return what would be updated for user confirmation
+        if preview_only:
+            preview_units = []
+            for unit in matching_units:
+                preview_units.append({
+                    "id": unit.get("id"),
+                    "name": unit.get("name"),
+                    "unit_number": unit.get("unit_number"),
+                    "width": unit.get("width"),
+                    "length": unit.get("length"),
+                    "height": unit.get("height"),
+                    "size": unit.get("size"),
+                    "description": unit.get("description"),
+                    "current_rentable": unit.get("rentable"),
+                    "status": unit.get("status"),
+                    "unit_amenities": [amenity.get("name") for amenity in unit.get("unit_amenities", [])]
+                })
+            
+            return jsonify({
+                "preview_mode": True,
+                "message": "PREVIEW: These units would be updated. Confirm to proceed.",
+                "search_criteria": {
+                    "width": width,
+                    "length": length,
+                    "height": height,
+                    "description_contains": description_contains,
+                    "amenity_names": amenity_names,
+                    "unit_name_starts_with": unit_name_starts_with
+                },
+                "total_units_found": len(matching_units),
+                "pages_searched": pages_searched,
+                "units_to_update": preview_units,
+                "confirmation_required": True,
+                "next_step": "Send same request with preview_only: false and confirmed_unit_ids: [list of IDs to update]"
+            })
+        
+        # UPDATE MODE: Filter to only confirmed units if specified
+        units_to_update = matching_units
+        if confirmed_unit_ids:
+            units_to_update = [unit for unit in matching_units if unit.get("id") in confirmed_unit_ids]
+        
+        # Now update each unit
         updated_units = []
         failed_units = []
         
-        for unit in matching_units:
+        for unit in units_to_update:
             try:
                 unit_id = unit.get("id")
                 unit_name = unit.get("name")
@@ -2625,6 +2750,132 @@ def is_valid_se_id(s):
         return True
     except Exception:
         return False
+
+
+# === OPTIMIZED ENDPOINTS FOR 8.5x11 UNITS ===
+
+@app.post("/william-warren/units/search-and-update-optimized")
+def search_and_update_optimized():
+    """Optimized bulk update for 8.5x11 units like 03A, 11A, etc.
+    
+    Uses smart page targeting to find units without overwhelming ChatGPT.
+    """
+    guard = require_bearer(request)
+    if guard: return guard
+    
+    raw_body = request.get_json(silent=True) or {}
+    
+    search_terms = raw_body.get("search_terms", [])
+    rentable = raw_body.get("rentable")
+    reason = raw_body.get("reason", "").strip()
+    
+    # Validation
+    if not search_terms or rentable is None or not reason:
+        return jsonify({"error": "MISSING_REQUIRED_FIELDS", 
+                       "message": "search_terms, rentable, and reason are required"}), 400
+    
+    # Detect if these are 8.5x11 units (##A pattern)
+    is_eight_five_pattern = all(len(name) == 3 and name.endswith('A') and name[:2].isdigit() for name in search_terms)
+    
+    found_units = []
+    
+    if is_eight_five_pattern:
+        # Target pages 7-8 where 8.5x11 units are located
+        search_pages = [7, 8]
+    else:
+        # General search for other unit types
+        search_pages = list(range(1, 11))  # Search 10 pages max
+    
+    try:
+        # Find units efficiently
+        for page in search_pages:
+            url = f"{BASE_URL}/v1/{WILLIAM_WARREN_FACILITY_ID}/units"
+            params = {"page": page, "per_page": 50}
+            
+            r = requests.get(url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+            
+            if r.status_code != 200:
+                continue
+                
+            data = r.json()
+            units = data.get("units", [])
+            
+            if not units:
+                continue
+            
+            # Find matching units on this page
+            for unit in units:
+                unit_name = str(unit.get("name", ""))
+                
+                if unit_name in search_terms:
+                    found_units.append(unit)
+            
+            # Stop if we found all requested units
+            if len(found_units) >= len(search_terms):
+                break
+        
+        if not found_units:
+            return jsonify({
+                "error": "NO_UNITS_FOUND",
+                "message": f"None of the search terms matched any units: {search_terms}",
+                "search_terms": search_terms,
+                "optimization_used": "8.5x11_pattern" if is_eight_five_pattern else "general_search"
+            }), 404
+        
+        # Update each found unit
+        updated_units = []
+        failed_units = []
+        
+        for unit in found_units:
+            unit_id = unit["id"]
+            unit_name = unit["name"]
+            
+            try:
+                update_url = f"{BASE_URL}/v1/{WILLIAM_WARREN_FACILITY_ID}/units/{unit_id}"
+                payload = {"unit": {"rentable": rentable}}
+                
+                r = requests.put(update_url, json=payload, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+                
+                if r.status_code == 200:
+                    updated_units.append({
+                        "id": unit_id,
+                        "name": unit_name,
+                        "unit_number": unit.get("unit_number", ""),
+                        "rentable": rentable,
+                        "previous_rentable": unit.get("rentable"),
+                        "status": "updated"
+                    })
+                else:
+                    failed_units.append({
+                        "id": unit_id,
+                        "name": unit_name,
+                        "error": f"HTTP {r.status_code}: {r.text[:100]}"
+                    })
+                    
+            except Exception as e:
+                failed_units.append({
+                    "id": unit.get("id"),
+                    "name": unit.get("name"),
+                    "error": str(e)
+                })
+        
+        return jsonify({
+            "search_terms": search_terms,
+            "total_units_found": len(found_units),
+            "units_updated_successfully": len(updated_units),
+            "units_failed": len(failed_units),
+            "rentable_status": rentable,
+            "reason": reason,
+            "optimization_used": "8.5x11_pattern" if is_eight_five_pattern else "general_search",
+            "updated_units": updated_units,
+            "failed_units": failed_units
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "error": "OPTIMIZED_UPDATE_ERROR",
+            "message": str(e)
+        }), 500
 
 
 if __name__ == "__main__":
