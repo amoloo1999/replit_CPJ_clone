@@ -43,11 +43,6 @@ app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 
-# Add startup logging
-print("Starting Storedge Proxy API...")
-print(f"Flask app initialized: {app.name}")
-print(f"Base URL configured: {os.getenv('BASE_URL', 'https://api.storedgefms.com')}")
-
 # Add error handlers for deployment
 @app.errorhandler(404)
 def not_found(error):
@@ -67,23 +62,6 @@ API_SECRET = os.getenv("STOREDGE_API_SECRET")
 BASE_URL = "https://api.storedgefms.com"
 # Prefer environment COMPANY_ID; fallback to legacy hardcoded (encourage override)
 COMPANY_ID = os.getenv("COMPANY_ID", "90df0cad-f32f-4c1f-8d78-9beda9622b34")
-
-# Validate required environment variables for deployment
-def validate_environment():
-    """Validate that required environment variables are set for deployment."""
-    missing_vars = []
-    if not API_KEY:
-        missing_vars.append("STOREDGE_API_KEY")
-    if not API_SECRET:
-        missing_vars.append("STOREDGE_API_SECRET")
-    
-    if missing_vars:
-        print(f"WARNING: Missing required environment variables: {', '.join(missing_vars)}")
-        print("The application may not function correctly without these variables.")
-        # Don't fail startup - just warn
-    
-# Validate environment on import
-validate_environment()
 
 # === Lightweight Bearer gate for GPT Action calls ===
 # Set PROXY_BEARER in your Replit Secrets; GPT Action will send Authorization: Bearer <token>
@@ -497,7 +475,7 @@ def list_units(facility_id):
         data = r.json()
         
         # Apply client-side filtering if Storedge doesn't support server-side filtering
-        units_data = data.get("data", {}).get("units", [])
+        units_data = data.get("units", [])
         if (search_term or name_contains or unit_number_contains) and units_data:
             filtered_units = []
             for unit in units_data:
@@ -771,7 +749,7 @@ def search_and_update_units(facility_id):
     rentable = raw_body.get("rentable")
     reason = raw_body.get("reason", "").strip()
     exact_match = raw_body.get("exact_match", False)
-    max_pages = min(50, max(1, int(raw_body.get("max_pages_per_search", 15))))
+    max_pages = min(50, max(1, int(raw_body.get("max_pages_per_search", 10))))
     
     # Validation
     validation_errors = []
@@ -806,7 +784,7 @@ def search_and_update_units(facility_id):
                 pages_searched = page
                 
                 url = f"{BASE_URL}/v1/{facility_id}/units"
-                params = {"page": page, "per_page": 50}
+                params = {"page": page, "per_page": 20}
                 
                 r = requests.get(url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
                 
@@ -963,7 +941,7 @@ def search_units(facility_id):
     
     search_term = request.args.get("search", "").strip()
     exact_match = request.args.get("exact_match", "false").lower() == "true"
-    max_pages = min(50, max(1, int(request.args.get("max_pages", "15"))))
+    max_pages = min(50, max(1, int(request.args.get("max_pages", "10"))))
     
     if not search_term:
         return jsonify({
@@ -978,9 +956,9 @@ def search_units(facility_id):
         for page in range(1, max_pages + 1):
             pages_searched = page
             
-            # Use manageable page size for GPT processing
+            # Use small page size to avoid timeouts
             url = f"{BASE_URL}/v1/{facility_id}/units"
-            params = {"page": page, "per_page": 50}  # Manageable batches
+            params = {"page": page, "per_page": 20}  # Small batches
             
             r = requests.get(url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
             
@@ -1135,7 +1113,7 @@ def find_and_update_unit_universal():
                 break
                 
             page_data = r.json()
-            units = page_data.get("data", {}).get("units", [])
+            units = page_data.get("units", [])
             
             if not units:  # No more units
                 break
@@ -1389,84 +1367,6 @@ def make_william_warren_unit_rentable(unit_id):
     
     # Forward to the existing make_rentable endpoint with the correct facility ID
     return make_unit_rentable(WILLIAM_WARREN_FACILITY_ID, unit_id)
-
-@app.post("/william-warren/units/search-by-name-optimized") 
-def search_units_by_name_optimized():
-    """Optimized search that finds units efficiently without overwhelming ChatGPT.
-    
-    For 8.5x11 units like 03A, 11A, etc., this searches the right pages directly.
-    """
-    guard = require_bearer(request)
-    if guard: return guard
-    
-    body = request.get_json()
-    if not body:
-        return jsonify({"error": "JSON_REQUIRED"}), 400
-    
-    unit_names = body.get("unit_names", [])
-    if not unit_names:
-        return jsonify({"error": "UNIT_NAMES_REQUIRED", "message": "Provide array of unit names to find"}), 400
-    
-    # Check if these are 8.5x11 units (##A pattern)
-    is_eight_five_pattern = all(len(name) == 3 and name.endswith('A') and name[:2].isdigit() for name in unit_names)
-    
-    found_units = []
-    
-    if is_eight_five_pattern:
-        # These are 8.5x11 units - search pages 7-8 directly
-        search_pages = [7, 8]
-        print(f"[OPTIMIZED] Detected 8.5x11 pattern, searching pages {search_pages}")
-    else:
-        # General search - start from page 1
-        search_pages = list(range(1, 16))  # Search up to 15 pages
-    
-    try:
-        for page in search_pages:
-            url = f"{BASE_URL}/v1/{WILLIAM_WARREN_FACILITY_ID}/units"
-            params = {"page": page, "per_page": 50}
-            
-            r = requests.get(url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
-            
-            if r.status_code != 200:
-                continue
-                
-            data = r.json()
-            units = data.get("units", [])
-            
-            if not units:
-                continue
-            
-            # Search this page for our target units
-            for unit in units:
-                unit_name = str(unit.get("name", ""))
-                
-                if unit_name in unit_names:
-                    found_units.append({
-                        "id": unit.get("id"),
-                        "name": unit_name,
-                        "unit_number": unit.get("unit_number", ""),
-                        "size": unit.get("size", ""),
-                        "rentable": unit.get("rentable"),
-                        "status": unit.get("status"),
-                        "found_on_page": page
-                    })
-            
-            # If we found all units, stop searching
-            if len(found_units) >= len(unit_names):
-                break
-        
-        return jsonify({
-            "unit_names_requested": unit_names,
-            "units_found": len(found_units),
-            "units": found_units,
-            "optimization_used": "8.5x11_pattern" if is_eight_five_pattern else "general_search"
-        })
-        
-    except Exception as e:
-        return jsonify({
-            "error": "OPTIMIZED_SEARCH_ERROR",
-            "message": str(e)
-        }), 500
 
 @app.post("/william-warren/units/search-and-update")
 def search_and_update_william_warren_units():
@@ -2645,27 +2545,18 @@ def health():
 def readiness():
     """Readiness check for deployment health checks"""
     checks = {
-        "flask_app": True,
+        "api_keys": bool(API_KEY and API_SECRET),
         "company_id": bool(COMPANY_ID),
-        # Only require API keys if we have at least one (for graceful startup)
-        "has_credentials": bool(API_KEY or API_SECRET or PROXY_BEARER)
+        "proxy_bearer": bool(PROXY_BEARER),
+        "flask_app": True
     }
     
-    # Optional checks (don't fail readiness)
-    optional_checks = {
-        "api_key": bool(API_KEY),
-        "api_secret": bool(API_SECRET),
-        "proxy_bearer": bool(PROXY_BEARER)
-    }
-    
-    # App is ready if core checks pass
     all_ready = all(checks.values())
     status_code = 200 if all_ready else 503
     
     return jsonify({
         "ready": all_ready,
         "checks": checks,
-        "optional_checks": optional_checks,
         "timestamp": datetime.utcnow().isoformat()
     }), status_code
 
@@ -2781,128 +2672,6 @@ def is_valid_se_id(s):
         return True
     except Exception:
         return False
-
-
-# === SMART UNIT SEARCH ===
-
-@app.post("/units/search-and-update")
-def universal_search_and_update():
-    """SIMPLE WORKING SEARCH: Find facility by name, find units by name, update them"""
-    guard = require_bearer(request)
-    if guard: return guard
-    
-    body = request.get_json(silent=True) or {}
-    facility_name = body.get("facility_name", "").strip()
-    unit_names = body.get("unit_names", [])
-    rentable = body.get("rentable")
-    reason = body.get("reason", "").strip()
-    
-    if not facility_name or not unit_names or rentable is None or not reason:
-        return jsonify({"error": "Missing required fields: facility_name, unit_names, rentable, reason"}), 400
-    
-    try:
-        # STEP 1: Find facility by name
-        facilities_url = f"{BASE_URL}/v1/companies/{COMPANY_ID}/facilities/short"
-        r = requests.get(facilities_url, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
-        
-        if r.status_code != 200:
-            return jsonify({"error": "Failed to get facilities"}), 500
-            
-        data = r.json()
-        facilities = data.get("facilities", [])
-        matching_facilities = [f for f in facilities if facility_name.lower() in f.get("facility_name", "").lower()]
-        
-        if not matching_facilities:
-            return jsonify({"error": "FACILITY_NOT_FOUND", "facility_name": facility_name, "available_facilities": [f.get("facility_name") for f in facilities[:10]]}), 404
-        
-        if len(matching_facilities) > 1:
-            return jsonify({"error": "MULTIPLE_FACILITIES_FOUND", "matches": [{"id": f["id"], "name": f["facility_name"]} for f in matching_facilities]}), 400
-        
-        facility_id = matching_facilities[0]["id"]
-        
-        # STEP 2: Find units by name within facility
-        found_units = []
-        not_found = []
-        
-        for unit_name in unit_names:
-            # Search through pages to find the unit
-            unit_found = False
-            for page in range(1, 21):  # Search 20 pages max
-                units_url = f"{BASE_URL}/v1/{facility_id}/units"
-                params = {"page": page, "per_page": 50}
-                
-                r = requests.get(units_url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
-                if r.status_code != 200:
-                    break
-                    
-                units = r.json().get("units", [])
-                if not units:
-                    break
-                
-                # Look for partial matches
-                matches = [u for u in units if unit_name.lower() in u.get("name", "").lower() or u.get("name", "").lower() in unit_name.lower()]
-                
-                if matches:
-                    found_units.extend(matches)
-                    unit_found = True
-                    break
-            
-            if not unit_found:
-                not_found.append(unit_name)
-        
-        if not found_units:
-            return jsonify({
-                "error": "NO_UNITS_FOUND", 
-                "facility": matching_facilities[0]["name"],
-                "searched_for": unit_names,
-                "not_found": not_found
-            }), 404
-        
-        # STEP 3: Show matches for confirmation if there are multiple or inexact matches
-        if len(found_units) != len(unit_names) or any(u.get("name") not in unit_names for u in found_units):
-            return jsonify({
-                "confirmation_needed": True,
-                "facility": matching_facilities[0]["facility_name"],
-                "found_units": [{"id": u["id"], "name": u["name"], "rentable": u.get("rentable")} for u in found_units],
-                "searched_for": unit_names,
-                "not_found": not_found,
-                "message": "Please confirm these are the correct units to update"
-            })
-        
-        # STEP 4: Update the units
-        updated_units = []
-        failed_units = []
-        
-        for unit in found_units:
-            try:
-                update_url = f"{BASE_URL}/v1/{facility_id}/units/{unit['id']}"
-                r = requests.put(update_url, json={"unit": {"rentable": rentable}}, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
-                
-                if r.status_code == 200:
-                    updated_units.append({
-                        "id": unit["id"], 
-                        "name": unit["name"], 
-                        "rentable": rentable,
-                        "previous_rentable": unit.get("rentable")
-                    })
-                else:
-                    failed_units.append({"id": unit["id"], "name": unit["name"], "error": f"HTTP {r.status_code}"})
-            except Exception as e:
-                failed_units.append({"id": unit.get("id"), "name": unit.get("name"), "error": str(e)})
-        
-        return jsonify({
-            "facility": matching_facilities[0]["facility_name"],
-            "total_found": len(found_units),
-            "updated_successfully": len(updated_units), 
-            "failed": len(failed_units),
-            "rentable": rentable,
-            "reason": reason,
-            "updated_units": updated_units,
-            "failed_units": failed_units
-        })
-        
-    except Exception as e:
-        return jsonify({"error": "SEARCH_ERROR", "message": str(e)}), 500
 
 
 if __name__ == "__main__":
