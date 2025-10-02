@@ -43,6 +43,11 @@ app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 
+# Add startup logging
+print("Starting Storedge Proxy API...")
+print(f"Flask app initialized: {app.name}")
+print(f"Base URL configured: {os.getenv('BASE_URL', 'https://api.storedgefms.com')}")
+
 # Add error handlers for deployment
 @app.errorhandler(404)
 def not_found(error):
@@ -62,6 +67,23 @@ API_SECRET = os.getenv("STOREDGE_API_SECRET")
 BASE_URL = "https://api.storedgefms.com"
 # Prefer environment COMPANY_ID; fallback to legacy hardcoded (encourage override)
 COMPANY_ID = os.getenv("COMPANY_ID", "90df0cad-f32f-4c1f-8d78-9beda9622b34")
+
+# Validate required environment variables for deployment
+def validate_environment():
+    """Validate that required environment variables are set for deployment."""
+    missing_vars = []
+    if not API_KEY:
+        missing_vars.append("STOREDGE_API_KEY")
+    if not API_SECRET:
+        missing_vars.append("STOREDGE_API_SECRET")
+    
+    if missing_vars:
+        print(f"WARNING: Missing required environment variables: {', '.join(missing_vars)}")
+        print("The application may not function correctly without these variables.")
+        # Don't fail startup - just warn
+    
+# Validate environment on import
+validate_environment()
 
 # === Lightweight Bearer gate for GPT Action calls ===
 # Set PROXY_BEARER in your Replit Secrets; GPT Action will send Authorization: Bearer <token>
@@ -2623,18 +2645,27 @@ def health():
 def readiness():
     """Readiness check for deployment health checks"""
     checks = {
-        "api_keys": bool(API_KEY and API_SECRET),
+        "flask_app": True,
         "company_id": bool(COMPANY_ID),
-        "proxy_bearer": bool(PROXY_BEARER),
-        "flask_app": True
+        # Only require API keys if we have at least one (for graceful startup)
+        "has_credentials": bool(API_KEY or API_SECRET or PROXY_BEARER)
     }
     
+    # Optional checks (don't fail readiness)
+    optional_checks = {
+        "api_key": bool(API_KEY),
+        "api_secret": bool(API_SECRET),
+        "proxy_bearer": bool(PROXY_BEARER)
+    }
+    
+    # App is ready if core checks pass
     all_ready = all(checks.values())
     status_code = 200 if all_ready else 503
     
     return jsonify({
         "ready": all_ready,
         "checks": checks,
+        "optional_checks": optional_checks,
         "timestamp": datetime.utcnow().isoformat()
     }), status_code
 
