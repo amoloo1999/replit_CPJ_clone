@@ -1027,46 +1027,72 @@ def search_units(facility_id):
 # These endpoints handle natural language requests like "update unit Mail2 at William Warren Group"
 
 def find_facility_by_name(facility_name, exact_match=False):
-    """Find a facility by name (partial or exact match)."""
+    """Find a facility by human name OR numeric/site fragment.
+
+    Improvements vs. earlier version:
+      * Case/whitespace insensitive
+      * Accepts numeric fragments (e.g. '1004') if they appear anywhere in facility_name
+      * Tries progressive strategies so we don't return the wrong facility on an overly broad substring
+      * Returns the FIRST *best* match; caller may later extend to return all candidates if needed
+    """
     try:
-        # Get all facilities
+        search_raw = (facility_name or "").strip()
+        if not search_raw:
+            return None
+        search_norm = re.sub(r"\s+", " ", search_raw).lower()
         url = f"{BASE_URL}/v1/companies/{COMPANY_ID}/facilities/short"
         r = requests.get(url, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
-        
         if r.status_code != 200:
+            print(f"[FacilityLookup] facilities/short failed {r.status_code}")
             return None
-            
         data = r.json()
         facilities = data.get("facilities", [])
-        
-        # Search for matching facility
-        facility_name_lower = facility_name.lower()
-        
-        for facility in facilities:
-            name = facility.get("facility_name", "").lower()
-            
-            if exact_match:
-                if facility_name_lower == name:
-                    return facility
-            else:
-                # Partial match - check if search term is in facility name
-                if facility_name_lower in name or name in facility_name_lower:
-                    return facility
-        
+        if not facilities:
+            return None
+
+        def norm_name(f):
+            return re.sub(r"\s+", " ", (f.get("facility_name") or "").strip()).lower()
+
+        # Strategy tiers
+        exact_matches = []
+        contains_matches = []
+        numeric_fragment_matches = []
+
+        is_numeric_fragment = search_norm.isdigit()
+
+        for fac in facilities:
+            nm = norm_name(fac)
+            if not nm:
+                continue
+            if exact_match and nm == search_norm:
+                return fac
+            if not exact_match:
+                if nm == search_norm:
+                    exact_matches.append(fac)
+                elif search_norm in nm or nm in search_norm:
+                    contains_matches.append(fac)
+                elif is_numeric_fragment and any(part.isdigit() and search_norm in part for part in re.split(r"[^0-9]", nm)):
+                    numeric_fragment_matches.append(fac)
+
+        if exact_matches:
+            return exact_matches[0]
+        if contains_matches:
+            return contains_matches[0]
+        if numeric_fragment_matches:
+            return numeric_fragment_matches[0]
         return None
-        
     except Exception as e:
-        print(f"Error finding facility: {e}")
+        print(f"[FacilityLookup] Error: {e}")
         return None
 
 @app.post("/universal/find-and-update-unit")
-def find_and_update_unit_universal():
+def find_and_update_unit_universal(_override_body=None):
     """Universal endpoint to find and update unit at any facility using natural language."""
     guard = require_bearer(request)
     if guard: return guard
     
     try:
-        data = request.get_json()
+        data = _override_body if _override_body is not None else request.get_json()
         if not data:
             return jsonify({"error": "MISSING_DATA", "message": "Request body required"}), 400
         
@@ -1297,14 +1323,7 @@ def make_unit_unrentable_universal():
         "exact_unit_match": False
     }
     
-    # Temporarily store the original request
-    original_request_json = request.get_json
-    request.get_json = lambda: update_data
-    
-    try:
-        return find_and_update_unit_universal()
-    finally:
-        request.get_json = original_request_json
+    return find_and_update_unit_universal(_override_body=update_data)
 
 @app.post("/universal/make-unit-rentable")  
 def make_unit_rentable_universal():
@@ -1326,14 +1345,7 @@ def make_unit_rentable_universal():
         "exact_unit_match": False
     }
     
-    # Temporarily store the original request
-    original_request_json = request.get_json
-    request.get_json = lambda: update_data
-    
-    try:
-        return find_and_update_unit_universal()
-    finally:
-        request.get_json = original_request_json
+    return find_and_update_unit_universal(_override_body=update_data)
 
 # === William Warren Group Specific Endpoints (GPT Actions Optimized) ===
 # These endpoints are pre-configured with the William Warren Group facility ID
@@ -1746,6 +1758,7 @@ def universal_search_by_dimensions_and_update():
     rentable = body.get("rentable")
     reason = body.get("reason", "")
     max_pages = min(20, max(1, body.get("max_pages", 10)))
+    auto_extend = body.get("auto_extend", True)  # if true and no matches, automatically extend search to 20 pages
     
     # SAFETY FEATURE: Preview mode (default: true for safety)
     preview_only = body.get("preview_only", True)
@@ -1760,7 +1773,7 @@ def universal_search_by_dimensions_and_update():
             return jsonify({"error": "REASON_REQUIRED", "message": "reason is required for updates"}), 400
     
     # First, search for matching units
-    matching_units = []
+    matching_units = []  # raw Storedge unit dicts matching criteria
     pages_searched = 0
     
     try:
@@ -1822,6 +1835,50 @@ def universal_search_by_dimensions_and_update():
                 if match:
                     matching_units.append(unit)
         
+        # If no matches and auto_extend allowed and we have not already searched full 20 pages, keep searching
+        if not matching_units and auto_extend and max_pages < 20 and pages_searched == max_pages:
+            for page in range(max_pages + 1, 21):
+                pages_searched = page
+                url = f"{BASE_URL}/v1/{facility_id}/units"
+                params = {"page": page, "per_page": 50}
+                r = requests.get(url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+                if r.status_code != 200:
+                    break
+                data = r.json()
+                units = data.get("units", [])
+                if not units:
+                    break
+                for unit in units:
+                    match = True
+                    if width is not None and unit.get("width") != width:
+                        match = False
+                    if length is not None and unit.get("length") != length:
+                        match = False
+                    if height is not None and unit.get("height") != height:
+                        match = False
+                    if description_contains:
+                        unit_description = str(unit.get("description", "")).lower()
+                        if description_contains.lower() not in unit_description:
+                            match = False
+                    if amenity_names:
+                        required_amenities = [name.strip().lower() for name in amenity_names.split(",")]
+                        unit_amenities = unit.get("unit_amenities", [])
+                        unit_amenity_names = [amenity.get("name", "").lower() for amenity in unit_amenities]
+                        for required in required_amenities:
+                            if not any(required in amenity_name for amenity_name in unit_amenity_names):
+                                match = False
+                                break
+                    if unit_name_starts_with:
+                        unit_name = str(unit.get("name", "")).lower()
+                        unit_number = str(unit.get("unit_number", "")).lower()
+                        prefix = unit_name_starts_with.lower()
+                        if not (unit_name.startswith(prefix) or unit_number.startswith(prefix)):
+                            match = False
+                    if match:
+                        matching_units.append(unit)
+
+        auto_extended = pages_searched > max_pages
+
         # PREVIEW MODE: Just return what would be updated for user confirmation
         if preview_only:
             preview_units = []
@@ -1857,48 +1914,130 @@ def universal_search_by_dimensions_and_update():
                 "pages_searched": pages_searched,
                 "units_to_update": preview_units,
                 "confirmation_required": True,
-                "next_step": "Send same request with preview_only: false and confirmed_unit_ids: [list of IDs to update]"
+                "next_step": "Send same request with preview_only: false and confirmed_unit_ids: [list of IDs to update]",
+                "auto_extended": auto_extended,
+                "note": "preview_only defaults to true; you MUST send preview_only:false + rentable + reason to perform updates",
+                "hint_if_zero_on_confirm": "If later update shows units_updated_successfully=0, verify: (1) facility resolved correctly, (2) confirmed_unit_ids overlap preview IDs (or omit to update all), (3) rentable actually changes state, (4) you sent preview_only:false"
             })
         
         # UPDATE MODE: Filter to only confirmed units if specified
         units_to_update = matching_units
         if confirmed_unit_ids:
             units_to_update = [unit for unit in matching_units if unit.get("id") in confirmed_unit_ids]
+
+        if not units_to_update:
+            return jsonify({
+                "error": "NO_UNITS_TO_UPDATE",
+                "message": "No units left after applying confirmed_unit_ids filter" if confirmed_unit_ids else "No matching units for criteria",
+                "facility_name": facility_display_name,
+                "facility_id": facility_id,
+                "search_criteria": {
+                    "width": width,
+                    "length": length,
+                    "height": height,
+                    "description_contains": description_contains,
+                    "amenity_names": amenity_names,
+                    "unit_name_starts_with": unit_name_starts_with
+                },
+                "preview_recommended": True
+            }), 400
         
         # Now update each unit
         updated_units = []
         failed_units = []
-        
+        per_unit_attempts = []  # diagnostic details even for successes
+
         for unit in units_to_update:
             try:
                 unit_id = unit.get("id")
                 unit_name = unit.get("name")
                 
-                # Use the working PUT endpoint
+                # Use the working PUT endpoint with intelligent fallbacks
                 update_url = f"{BASE_URL}/v1/{facility_id}/units/{unit_id}"
-                payload = {"unit": {"rentable": rentable}}
-                
-                update_response = requests.put(update_url, json=payload, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
-                
-                if update_response.status_code == 200:
-                    updated_data = update_response.json()
-                    updated_units.append({
-                        "id": unit_id,
-                        "name": unit_name,
-                        "unit_number": unit.get("unit_number", ""),
-                        "rentable": rentable,
-                        "previous_rentable": unit.get("rentable"),
-                        "width": unit.get("width"),
-                        "length": unit.get("length"),
-                        "height": unit.get("height"),
-                        "status": "updated"
-                    })
-                else:
+                # Primary payload
+                base_payload = {"unit": {"rentable": rentable}}
+                # Add reason variants for unrentable attempts
+                reason_clean = (reason or "").strip()
+                attempt_payloads = [base_payload]
+                if not preview_only and reason_clean:
+                    # Common possible field names (since Storedge docs may differ in environments)
+                    attempt_payloads.extend([
+                        {"unit": {"rentable": rentable, "reason": reason_clean}},
+                        {"unit": {"rentable": rentable, "rentable_reason": reason_clean}},
+                    ])
+                    if rentable is False:
+                        attempt_payloads.append({"unit": {"rentable": rentable, "unrentable_reason": reason_clean}})
+                # Also try PATCH variants as last resort
+                attempt_methods = ["PUT", "PATCH"]
+                force_retry_payloads = True
+                success = False
+                attempt_details = []  # collect all attempts for this unit
+                for method in attempt_methods:
+                    if success:
+                        break
+                    for idx, payload in enumerate(attempt_payloads):
+                        try:
+                            resp = requests.request(method, update_url, json=payload, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+                        except Exception as req_e:
+                            attempt_details.append({
+                                "method": method,
+                                "payload_variant": idx,
+                                "error": str(req_e)
+                            })
+                            continue
+                        if resp.status_code == 200:
+                            # Storedge returns {"unit": {...}}; fall back gracefully
+                            try:
+                                resp_json = resp.json()
+                            except Exception:
+                                resp_json = {}
+                            updated_payload = resp_json.get("unit") if isinstance(resp_json, dict) else None
+                            updated_units.append({
+                                "id": unit_id,
+                                "name": unit_name,
+                                "unit_number": unit.get("unit_number", ""),
+                                "rentable": rentable,
+                                "previous_rentable": unit.get("rentable"),
+                                "width": unit.get("width"),
+                                "length": unit.get("length"),
+                                "height": unit.get("height"),
+                                "status": "updated",
+                                "method_used": method,
+                                "payload_variant": idx
+                            })
+                            attempt_details.append({
+                                "method": method,
+                                "payload_variant": idx,
+                                "status": resp.status_code,
+                                "body_excerpt": (resp.text[:160] if resp.text else "")
+                            })
+                            success = True
+                            break
+                        else:
+                            # Collect more verbose failure context (trim large bodies)
+                            body_excerpt = resp.text[:300] if resp.text else ""
+                            attempt_details.append({
+                                "method": method,
+                                "payload_variant": idx,
+                                "status": resp.status_code,
+                                "body": body_excerpt
+                            })
+                    # If not forcing exhaustive retries and first method failed entirely, break
+                    if not force_retry_payloads:
+                        break
+                if not success:
                     failed_units.append({
                         "id": unit_id,
                         "name": unit_name,
-                        "error": f"HTTP {update_response.status_code}: {update_response.text[:100]}"
+                        "error": "ALL_VARIANTS_FAILED",
+                        "attempts": attempt_details
                     })
+                per_unit_attempts.append({
+                    "unit_id": unit_id,
+                    "name": unit_name,
+                    "success": success,
+                    "attempts": attempt_details
+                })
                     
             except Exception as e:
                 failed_units.append({
@@ -1906,7 +2045,16 @@ def universal_search_by_dimensions_and_update():
                     "name": unit.get("name"),
                     "error": str(e)
                 })
+                per_unit_attempts.append({
+                    "unit_id": unit.get("id"),
+                    "name": unit.get("name"),
+                    "success": False,
+                    "attempts": [{"error": str(e)}]
+                })
         
+        zero_change_hint = None
+        if len(updated_units) == 0 and len(failed_units) == 0 and matching_units:
+            zero_change_hint = "All target units already had rentable state = requested value; nothing changed."
         return jsonify({
             "facility_name": facility_display_name,
             "facility_id": facility_id,
@@ -1919,13 +2067,17 @@ def universal_search_by_dimensions_and_update():
                 "unit_name_starts_with": unit_name_starts_with
             },
             "total_units_found": len(matching_units),
+            "units_attempted": len(units_to_update),
             "units_updated_successfully": len(updated_units),
             "units_failed": len(failed_units),
             "rentable_status": rentable,
             "reason": reason,
             "pages_searched": pages_searched,
             "updated_units": updated_units,
-            "failed_units": failed_units
+            "failed_units": failed_units,
+            "auto_extended": auto_extended,
+            "per_unit_attempts": per_unit_attempts,
+            "zero_change_hint": zero_change_hint
         })
         
     except Exception as e:
