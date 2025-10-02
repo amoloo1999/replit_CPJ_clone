@@ -2752,11 +2752,11 @@ def is_valid_se_id(s):
         return False
 
 
-# === OPTIMIZED SEARCH FOR 8.5x11 UNITS ===
+# === SMART UNIT SEARCH ===
 
 @app.post("/william-warren/units/search-and-update-optimized")  
 def search_and_update_optimized():
-    """Fast search for 8.5x11 units (##A pattern) targeting pages 7-8"""
+    """Actually smart search using existing search endpoint instead of dumb pagination"""
     guard = require_bearer(request)
     if guard: return guard
     
@@ -2768,32 +2768,34 @@ def search_and_update_optimized():
     if not search_terms or rentable is None or not reason:
         return jsonify({"error": "Missing required fields"}), 400
     
-    # Detect ##A pattern for 8.5x11 units
-    is_eight_five = all(len(n) == 3 and n.endswith('A') and n[:2].isdigit() for n in search_terms)
-    pages = [7, 8] if is_eight_five else list(range(1, 11))
-    
     found_units, updated_units, failed_units = [], [], []
     
     try:
-        # Search efficiently
-        for page in pages:
-            url = f"{BASE_URL}/v1/{WILLIAM_WARREN_FACILITY_ID}/units"
-            r = requests.get(url, params={"page": page, "per_page": 50}, 
-                           auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+        # Use the existing smart search endpoint for each unit
+        for unit_name in search_terms:
+            search_url = f"{BASE_URL}/v1/{WILLIAM_WARREN_FACILITY_ID}/units/search"
+            params = {"q": unit_name, "exact_match": True}
+            
+            r = requests.get(search_url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
             
             if r.status_code == 200:
-                units = r.json().get("units", [])
+                data = r.json()
+                units = data.get("units", [])
+                
+                # Find exact matches
                 for unit in units:
-                    if str(unit.get("name", "")) in search_terms:
+                    if str(unit.get("name", "")) == unit_name:
                         found_units.append(unit)
-                        
-                if len(found_units) >= len(search_terms):
-                    break
+                        break
         
         if not found_units:
-            return jsonify({"error": "NO_UNITS_FOUND", "search_terms": search_terms}), 404
+            return jsonify({
+                "error": "NO_UNITS_FOUND", 
+                "message": f"None found: {search_terms}",
+                "search_terms": search_terms
+            }), 404
         
-        # Update units
+        # Update each found unit
         for unit in found_units:
             try:
                 update_url = f"{BASE_URL}/v1/{WILLIAM_WARREN_FACILITY_ID}/units/{unit['id']}"
@@ -2801,18 +2803,31 @@ def search_and_update_optimized():
                                auth=OAuth1(API_KEY, API_SECRET), timeout=30)
                 
                 if r.status_code == 200:
-                    updated_units.append({"id": unit["id"], "name": unit["name"], "status": "updated"})
+                    updated_units.append({
+                        "id": unit["id"], 
+                        "name": unit["name"], 
+                        "rentable": rentable,
+                        "status": "updated"
+                    })
                 else:
-                    failed_units.append({"id": unit["id"], "name": unit["name"], "error": f"HTTP {r.status_code}"})
+                    failed_units.append({
+                        "id": unit["id"], 
+                        "name": unit["name"], 
+                        "error": f"HTTP {r.status_code}"
+                    })
             except Exception as e:
-                failed_units.append({"id": unit.get("id"), "name": unit.get("name"), "error": str(e)})
+                failed_units.append({
+                    "id": unit.get("id"), 
+                    "name": unit.get("name"), 
+                    "error": str(e)
+                })
         
         return jsonify({
             "search_terms": search_terms,
             "total_found": len(found_units),
             "updated_successfully": len(updated_units), 
             "failed": len(failed_units),
-            "optimization_used": "8.5x11_pattern" if is_eight_five else "general",
+            "optimization_used": "direct_search_api",
             "updated_units": updated_units,
             "failed_units": failed_units
         })
