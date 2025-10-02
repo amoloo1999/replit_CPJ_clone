@@ -2752,130 +2752,73 @@ def is_valid_se_id(s):
         return False
 
 
-# === OPTIMIZED ENDPOINTS FOR 8.5x11 UNITS ===
+# === OPTIMIZED SEARCH FOR 8.5x11 UNITS ===
 
-@app.post("/william-warren/units/search-and-update-optimized")
+@app.post("/william-warren/units/search-and-update-optimized")  
 def search_and_update_optimized():
-    """Optimized bulk update for 8.5x11 units like 03A, 11A, etc.
-    
-    Uses smart page targeting to find units without overwhelming ChatGPT.
-    """
+    """Fast search for 8.5x11 units (##A pattern) targeting pages 7-8"""
     guard = require_bearer(request)
     if guard: return guard
     
-    raw_body = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True) or {}
+    search_terms = body.get("search_terms", [])
+    rentable = body.get("rentable")
+    reason = body.get("reason", "").strip()
     
-    search_terms = raw_body.get("search_terms", [])
-    rentable = raw_body.get("rentable")
-    reason = raw_body.get("reason", "").strip()
-    
-    # Validation
     if not search_terms or rentable is None or not reason:
-        return jsonify({"error": "MISSING_REQUIRED_FIELDS", 
-                       "message": "search_terms, rentable, and reason are required"}), 400
+        return jsonify({"error": "Missing required fields"}), 400
     
-    # Detect if these are 8.5x11 units (##A pattern)
-    is_eight_five_pattern = all(len(name) == 3 and name.endswith('A') and name[:2].isdigit() for name in search_terms)
+    # Detect ##A pattern for 8.5x11 units
+    is_eight_five = all(len(n) == 3 and n.endswith('A') and n[:2].isdigit() for n in search_terms)
+    pages = [7, 8] if is_eight_five else list(range(1, 11))
     
-    found_units = []
-    
-    if is_eight_five_pattern:
-        # Target pages 7-8 where 8.5x11 units are located
-        search_pages = [7, 8]
-    else:
-        # General search for other unit types
-        search_pages = list(range(1, 11))  # Search 10 pages max
+    found_units, updated_units, failed_units = [], [], []
     
     try:
-        # Find units efficiently
-        for page in search_pages:
+        # Search efficiently
+        for page in pages:
             url = f"{BASE_URL}/v1/{WILLIAM_WARREN_FACILITY_ID}/units"
-            params = {"page": page, "per_page": 50}
+            r = requests.get(url, params={"page": page, "per_page": 50}, 
+                           auth=OAuth1(API_KEY, API_SECRET), timeout=30)
             
-            r = requests.get(url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
-            
-            if r.status_code != 200:
-                continue
-                
-            data = r.json()
-            units = data.get("units", [])
-            
-            if not units:
-                continue
-            
-            # Find matching units on this page
-            for unit in units:
-                unit_name = str(unit.get("name", ""))
-                
-                if unit_name in search_terms:
-                    found_units.append(unit)
-            
-            # Stop if we found all requested units
-            if len(found_units) >= len(search_terms):
-                break
+            if r.status_code == 200:
+                units = r.json().get("units", [])
+                for unit in units:
+                    if str(unit.get("name", "")) in search_terms:
+                        found_units.append(unit)
+                        
+                if len(found_units) >= len(search_terms):
+                    break
         
         if not found_units:
-            return jsonify({
-                "error": "NO_UNITS_FOUND",
-                "message": f"None of the search terms matched any units: {search_terms}",
-                "search_terms": search_terms,
-                "optimization_used": "8.5x11_pattern" if is_eight_five_pattern else "general_search"
-            }), 404
+            return jsonify({"error": "NO_UNITS_FOUND", "search_terms": search_terms}), 404
         
-        # Update each found unit
-        updated_units = []
-        failed_units = []
-        
+        # Update units
         for unit in found_units:
-            unit_id = unit["id"]
-            unit_name = unit["name"]
-            
             try:
-                update_url = f"{BASE_URL}/v1/{WILLIAM_WARREN_FACILITY_ID}/units/{unit_id}"
-                payload = {"unit": {"rentable": rentable}}
-                
-                r = requests.put(update_url, json=payload, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+                update_url = f"{BASE_URL}/v1/{WILLIAM_WARREN_FACILITY_ID}/units/{unit['id']}"
+                r = requests.put(update_url, json={"unit": {"rentable": rentable}}, 
+                               auth=OAuth1(API_KEY, API_SECRET), timeout=30)
                 
                 if r.status_code == 200:
-                    updated_units.append({
-                        "id": unit_id,
-                        "name": unit_name,
-                        "unit_number": unit.get("unit_number", ""),
-                        "rentable": rentable,
-                        "previous_rentable": unit.get("rentable"),
-                        "status": "updated"
-                    })
+                    updated_units.append({"id": unit["id"], "name": unit["name"], "status": "updated"})
                 else:
-                    failed_units.append({
-                        "id": unit_id,
-                        "name": unit_name,
-                        "error": f"HTTP {r.status_code}: {r.text[:100]}"
-                    })
-                    
+                    failed_units.append({"id": unit["id"], "name": unit["name"], "error": f"HTTP {r.status_code}"})
             except Exception as e:
-                failed_units.append({
-                    "id": unit.get("id"),
-                    "name": unit.get("name"),
-                    "error": str(e)
-                })
+                failed_units.append({"id": unit.get("id"), "name": unit.get("name"), "error": str(e)})
         
         return jsonify({
             "search_terms": search_terms,
-            "total_units_found": len(found_units),
-            "units_updated_successfully": len(updated_units),
-            "units_failed": len(failed_units),
-            "rentable_status": rentable,
-            "reason": reason,
-            "optimization_used": "8.5x11_pattern" if is_eight_five_pattern else "general_search",
+            "total_found": len(found_units),
+            "updated_successfully": len(updated_units), 
+            "failed": len(failed_units),
+            "optimization_used": "8.5x11_pattern" if is_eight_five else "general",
             "updated_units": updated_units,
             "failed_units": failed_units
         })
         
     except Exception as e:
-        return jsonify({
-            "error": "OPTIMIZED_UPDATE_ERROR",
-            "message": str(e)
-        }), 500
+        return jsonify({"error": "SEARCH_ERROR", "message": str(e)}), 500
 
 
 if __name__ == "__main__":
