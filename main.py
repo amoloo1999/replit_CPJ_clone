@@ -2754,80 +2754,118 @@ def is_valid_se_id(s):
 
 # === SMART UNIT SEARCH ===
 
-@app.post("/william-warren/units/search-and-update-optimized")  
-def search_and_update_optimized():
-    """Actually smart search using existing search endpoint instead of dumb pagination"""
+@app.post("/units/search-and-update")
+def universal_search_and_update():
+    """SIMPLE WORKING SEARCH: Find facility by name, find units by name, update them"""
     guard = require_bearer(request)
     if guard: return guard
     
     body = request.get_json(silent=True) or {}
-    search_terms = body.get("search_terms", [])
+    facility_name = body.get("facility_name", "").strip()
+    unit_names = body.get("unit_names", [])
     rentable = body.get("rentable")
     reason = body.get("reason", "").strip()
     
-    if not search_terms or rentable is None or not reason:
-        return jsonify({"error": "Missing required fields"}), 400
-    
-    found_units, updated_units, failed_units = [], [], []
+    if not facility_name or not unit_names or rentable is None or not reason:
+        return jsonify({"error": "Missing required fields: facility_name, unit_names, rentable, reason"}), 400
     
     try:
-        # Use the existing smart search endpoint for each unit
-        for unit_name in search_terms:
-            search_url = f"{BASE_URL}/v1/{WILLIAM_WARREN_FACILITY_ID}/units/search"
-            params = {"q": unit_name, "exact_match": True}
+        # STEP 1: Find facility by name
+        facilities_url = f"{BASE_URL}/v1/companies/{COMPANY_ID}/facilities/short"
+        r = requests.get(facilities_url, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+        
+        if r.status_code != 200:
+            return jsonify({"error": "Failed to get facilities"}), 500
             
-            r = requests.get(search_url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
-            
-            if r.status_code == 200:
-                data = r.json()
-                units = data.get("units", [])
+        data = r.json()
+        facilities = data.get("facilities", [])
+        matching_facilities = [f for f in facilities if facility_name.lower() in f.get("facility_name", "").lower()]
+        
+        if not matching_facilities:
+            return jsonify({"error": "FACILITY_NOT_FOUND", "facility_name": facility_name, "available_facilities": [f.get("facility_name") for f in facilities[:10]]}), 404
+        
+        if len(matching_facilities) > 1:
+            return jsonify({"error": "MULTIPLE_FACILITIES_FOUND", "matches": [{"id": f["id"], "name": f["facility_name"]} for f in matching_facilities]}), 400
+        
+        facility_id = matching_facilities[0]["id"]
+        
+        # STEP 2: Find units by name within facility
+        found_units = []
+        not_found = []
+        
+        for unit_name in unit_names:
+            # Search through pages to find the unit
+            unit_found = False
+            for page in range(1, 21):  # Search 20 pages max
+                units_url = f"{BASE_URL}/v1/{facility_id}/units"
+                params = {"page": page, "per_page": 50}
                 
-                # Find exact matches
-                for unit in units:
-                    if str(unit.get("name", "")) == unit_name:
-                        found_units.append(unit)
-                        break
+                r = requests.get(units_url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+                if r.status_code != 200:
+                    break
+                    
+                units = r.json().get("units", [])
+                if not units:
+                    break
+                
+                # Look for partial matches
+                matches = [u for u in units if unit_name.lower() in u.get("name", "").lower() or u.get("name", "").lower() in unit_name.lower()]
+                
+                if matches:
+                    found_units.extend(matches)
+                    unit_found = True
+                    break
+            
+            if not unit_found:
+                not_found.append(unit_name)
         
         if not found_units:
             return jsonify({
                 "error": "NO_UNITS_FOUND", 
-                "message": f"None found: {search_terms}",
-                "search_terms": search_terms
+                "facility": matching_facilities[0]["name"],
+                "searched_for": unit_names,
+                "not_found": not_found
             }), 404
         
-        # Update each found unit
+        # STEP 3: Show matches for confirmation if there are multiple or inexact matches
+        if len(found_units) != len(unit_names) or any(u.get("name") not in unit_names for u in found_units):
+            return jsonify({
+                "confirmation_needed": True,
+                "facility": matching_facilities[0]["facility_name"],
+                "found_units": [{"id": u["id"], "name": u["name"], "rentable": u.get("rentable")} for u in found_units],
+                "searched_for": unit_names,
+                "not_found": not_found,
+                "message": "Please confirm these are the correct units to update"
+            })
+        
+        # STEP 4: Update the units
+        updated_units = []
+        failed_units = []
+        
         for unit in found_units:
             try:
-                update_url = f"{BASE_URL}/v1/{WILLIAM_WARREN_FACILITY_ID}/units/{unit['id']}"
-                r = requests.put(update_url, json={"unit": {"rentable": rentable}}, 
-                               auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+                update_url = f"{BASE_URL}/v1/{facility_id}/units/{unit['id']}"
+                r = requests.put(update_url, json={"unit": {"rentable": rentable}}, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
                 
                 if r.status_code == 200:
                     updated_units.append({
                         "id": unit["id"], 
                         "name": unit["name"], 
                         "rentable": rentable,
-                        "status": "updated"
+                        "previous_rentable": unit.get("rentable")
                     })
                 else:
-                    failed_units.append({
-                        "id": unit["id"], 
-                        "name": unit["name"], 
-                        "error": f"HTTP {r.status_code}"
-                    })
+                    failed_units.append({"id": unit["id"], "name": unit["name"], "error": f"HTTP {r.status_code}"})
             except Exception as e:
-                failed_units.append({
-                    "id": unit.get("id"), 
-                    "name": unit.get("name"), 
-                    "error": str(e)
-                })
+                failed_units.append({"id": unit.get("id"), "name": unit.get("name"), "error": str(e)})
         
         return jsonify({
-            "search_terms": search_terms,
+            "facility": matching_facilities[0]["facility_name"],
             "total_found": len(found_units),
             "updated_successfully": len(updated_units), 
             "failed": len(failed_units),
-            "optimization_used": "direct_search_api",
+            "rentable": rentable,
+            "reason": reason,
             "updated_units": updated_units,
             "failed_units": failed_units
         })
