@@ -1697,6 +1697,244 @@ def search_william_warren_units_by_dimensions_and_update():
         }), 500
 
 
+@app.post("/universal/search-by-dimensions-and-update")
+def universal_search_by_dimensions_and_update():
+    """Universal endpoint to search units by dimensions/amenities and update their rentable status at any facility."""
+    guard = require_bearer(request)
+    if guard: return guard
+    
+    body = request.get_json()
+    if not body:
+        return jsonify({"error": "JSON_REQUIRED"}), 400
+    
+    # Facility identification
+    facility_name = body.get("facility_name", "").strip()
+    facility_id = body.get("facility_id", "").strip()
+    
+    # Must provide either facility_name or facility_id
+    if not facility_name and not facility_id:
+        return jsonify({
+            "error": "FACILITY_REQUIRED", 
+            "message": "Must provide either facility_name or facility_id"
+        }), 400
+    
+    # If facility_name provided, find the facility_id
+    if facility_name and not facility_id:
+        facility = find_facility_by_name(facility_name, exact_match=False)
+        if not facility:
+            return jsonify({
+                "error": "FACILITY_NOT_FOUND",
+                "message": f"No facility found matching '{facility_name}'"
+            }), 404
+        facility_id = facility["id"]
+        facility_display_name = facility["facility_name"]
+    else:
+        # Use provided facility_id, optionally get name for display
+        facility_display_name = facility_id
+        if facility_name:
+            facility_display_name = facility_name
+    
+    # Search criteria
+    width = body.get("width")
+    length = body.get("length") 
+    height = body.get("height")
+    description_contains = body.get("description_contains", "")
+    amenity_names = body.get("amenity_names", "")  # comma-separated
+    unit_name_starts_with = body.get("unit_name_starts_with", "")
+    
+    # Update criteria  
+    rentable = body.get("rentable")
+    reason = body.get("reason", "")
+    max_pages = min(20, max(1, body.get("max_pages", 10)))
+    
+    # SAFETY FEATURE: Preview mode (default: true for safety)
+    preview_only = body.get("preview_only", True)
+    confirmed_unit_ids = body.get("confirmed_unit_ids", [])
+    
+    # Validation - only required for actual updates, not previews
+    if not preview_only:
+        if rentable not in (True, False):
+            return jsonify({"error": "RENTABLE_REQUIRED", "message": "rentable must be true or false"}), 400
+        
+        if not reason.strip():
+            return jsonify({"error": "REASON_REQUIRED", "message": "reason is required for updates"}), 400
+    
+    # First, search for matching units
+    matching_units = []
+    pages_searched = 0
+    
+    try:
+        for page in range(1, max_pages + 1):
+            pages_searched = page
+            
+            url = f"{BASE_URL}/v1/{facility_id}/units"
+            params = {"page": page, "per_page": 50}
+            
+            r = requests.get(url, params=params, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+            
+            if r.status_code != 200:
+                break
+                
+            data = r.json()
+            units = data.get("units", [])
+            
+            if not units:
+                break
+                
+            # Filter by criteria (same logic as William Warren endpoint)
+            for unit in units:
+                match = True
+                
+                # Check dimensions
+                if width is not None and unit.get("width") != width:
+                    match = False
+                if length is not None and unit.get("length") != length:
+                    match = False  
+                if height is not None and unit.get("height") != height:
+                    match = False
+                
+                # Check description
+                if description_contains:
+                    unit_description = str(unit.get("description", "")).lower()
+                    if description_contains.lower() not in unit_description:
+                        match = False
+                
+                # Check amenities
+                if amenity_names:
+                    required_amenities = [name.strip().lower() for name in amenity_names.split(",")]
+                    unit_amenities = unit.get("unit_amenities", [])
+                    unit_amenity_names = [amenity.get("name", "").lower() for amenity in unit_amenities]
+                    
+                    for required in required_amenities:
+                        if not any(required in amenity_name for amenity_name in unit_amenity_names):
+                            match = False
+                            break
+                
+                # Check unit name prefix
+                if unit_name_starts_with:
+                    unit_name = str(unit.get("name", "")).lower()
+                    unit_number = str(unit.get("unit_number", "")).lower() 
+                    prefix = unit_name_starts_with.lower()
+                    
+                    if not (unit_name.startswith(prefix) or unit_number.startswith(prefix)):
+                        match = False
+                
+                if match:
+                    matching_units.append(unit)
+        
+        # PREVIEW MODE: Just return what would be updated for user confirmation
+        if preview_only:
+            preview_units = []
+            for unit in matching_units:
+                preview_units.append({
+                    "id": unit.get("id"),
+                    "name": unit.get("name"),
+                    "unit_number": unit.get("unit_number"),
+                    "width": unit.get("width"),
+                    "length": unit.get("length"),
+                    "height": unit.get("height"),
+                    "size": unit.get("size"),
+                    "description": unit.get("description"),
+                    "current_rentable": unit.get("rentable"),
+                    "status": unit.get("status"),
+                    "unit_amenities": [amenity.get("name") for amenity in unit.get("unit_amenities", [])]
+                })
+            
+            return jsonify({
+                "preview_mode": True,
+                "message": "PREVIEW: These units would be updated. Confirm to proceed.",
+                "facility_name": facility_display_name,
+                "facility_id": facility_id,
+                "search_criteria": {
+                    "width": width,
+                    "length": length,
+                    "height": height,
+                    "description_contains": description_contains,
+                    "amenity_names": amenity_names,
+                    "unit_name_starts_with": unit_name_starts_with
+                },
+                "total_units_found": len(matching_units),
+                "pages_searched": pages_searched,
+                "units_to_update": preview_units,
+                "confirmation_required": True,
+                "next_step": "Send same request with preview_only: false and confirmed_unit_ids: [list of IDs to update]"
+            })
+        
+        # UPDATE MODE: Filter to only confirmed units if specified
+        units_to_update = matching_units
+        if confirmed_unit_ids:
+            units_to_update = [unit for unit in matching_units if unit.get("id") in confirmed_unit_ids]
+        
+        # Now update each unit
+        updated_units = []
+        failed_units = []
+        
+        for unit in units_to_update:
+            try:
+                unit_id = unit.get("id")
+                unit_name = unit.get("name")
+                
+                # Use the working PUT endpoint
+                update_url = f"{BASE_URL}/v1/{facility_id}/units/{unit_id}"
+                payload = {"unit": {"rentable": rentable}}
+                
+                update_response = requests.put(update_url, json=payload, auth=OAuth1(API_KEY, API_SECRET), timeout=30)
+                
+                if update_response.status_code == 200:
+                    updated_data = update_response.json()
+                    updated_units.append({
+                        "id": unit_id,
+                        "name": unit_name,
+                        "unit_number": unit.get("unit_number", ""),
+                        "rentable": rentable,
+                        "previous_rentable": unit.get("rentable"),
+                        "width": unit.get("width"),
+                        "length": unit.get("length"),
+                        "height": unit.get("height"),
+                        "status": "updated"
+                    })
+                else:
+                    failed_units.append({
+                        "id": unit_id,
+                        "name": unit_name,
+                        "error": f"HTTP {update_response.status_code}: {update_response.text[:100]}"
+                    })
+                    
+            except Exception as e:
+                failed_units.append({
+                    "id": unit.get("id"),
+                    "name": unit.get("name"),
+                    "error": str(e)
+                })
+        
+        return jsonify({
+            "facility_name": facility_display_name,
+            "facility_id": facility_id,
+            "search_criteria": {
+                "width": width,
+                "length": length,
+                "height": height,
+                "description_contains": description_contains,
+                "amenity_names": amenity_names,
+                "unit_name_starts_with": unit_name_starts_with
+            },
+            "total_units_found": len(matching_units),
+            "units_updated_successfully": len(updated_units),
+            "units_failed": len(failed_units),
+            "rentable_status": rentable,
+            "reason": reason,
+            "pages_searched": pages_searched,
+            "updated_units": updated_units,
+            "failed_units": failed_units
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "error": "UNIVERSAL_DIMENSION_SEARCH_UPDATE_ERROR",
+            "message": str(e)
+        }), 500
+
+
 @app.get("/facilities/<facility_id>/units/count")
 def get_units_count(facility_id):
     """Get unit count and pagination info for a facility.
